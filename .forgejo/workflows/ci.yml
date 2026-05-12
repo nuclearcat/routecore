@@ -17,7 +17,7 @@ jobs:
     runs-on: docker
     strategy:
       matrix:
-        rust: [1.85, stable, beta]
+        rust: [1.88, stable, beta]
         #args: ["--no-default-features", "", "--all-features"]
         args: ["", "--all-features"]
         target: [x86_64-unknown-linux-gnu]
