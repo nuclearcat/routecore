@@ -618,10 +618,10 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                 // peers must have negotiated that in the BGP OPENs, so we can
                 // assume there are no NLRI in the conventional parts of the
                 // PDU. We return the nexthop from the MP attribute.
-                if let Ok(Some((mp_afisafi, mp))) = self.mp_next_hop_tuple() {
-                    if mp_afisafi == AfiSafiType::Ipv4Unicast {
-                        return Ok(mp)
-                    }
+                if let Ok(Some((mp_afisafi, mp))) = self.mp_next_hop_tuple()
+                    && mp_afisafi == AfiSafiType::Ipv4Unicast
+                {
+                    return Ok(mp)
                 }
 
                 // If no MP_REACH_NLRI was found for Ipv4Unicast, we look for
