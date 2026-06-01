@@ -627,11 +627,10 @@ where
 
                         // `best` is always Some(..) at this point, but we do
                         // an `if let` instead of an `unwrap` anyway.
-                        if let Some((_, cur_best)) = best.as_ref() {
-                            if cur_best.borrow().inner() != c.borrow().inner()
-                            {
-                                backup = Some((idx, c));
-                            }
+                        if let Some((_, cur_best)) = best.as_ref()
+                            && cur_best.borrow().inner() != c.borrow().inner()
+                        {
+                            backup = Some((idx, c));
                         }
                     }
                     Some((idx_backup, cur_backup)) => {

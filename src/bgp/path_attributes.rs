@@ -1349,7 +1349,7 @@ impl Attribute for crate::bgp::message::update_builder::StandardCommunitiesList 
         parser: &mut Parser<'_, Octs>,
         _pdu_parse_info: PduParseInfo
     ) -> Result<(), ParseError> {
-        if parser.remaining() % 4 != 0 {
+        if !parser.remaining().is_multiple_of(4) {
             return Err(ParseError::form_error(
                 "unexpected length for COMMUNITIES"
             ));
@@ -1462,7 +1462,7 @@ impl Attribute for ClusterIds {
         parser: &mut Parser<'_, Octs>,
         _pdu_parse_info: PduParseInfo
     ) -> Result<(), ParseError> {
-        if parser.remaining() % 4 != 0 {
+        if !parser.remaining().is_multiple_of(4) {
             return Err(ParseError::form_error(
                 "unexpected length for CLUSTER_LIST"
             ));
@@ -1877,7 +1877,7 @@ impl Attribute for crate::bgp::path_attributes::ExtendedCommunitiesList {
         parser: &mut Parser<'_, Octs>,
         _pdu_parse_info: PduParseInfo
     ) -> Result<(), ParseError> {
-        if parser.remaining() % 8 != 0 {
+        if !parser.remaining().is_multiple_of(8) {
             return Err(ParseError::form_error(
                 "unexpected length for EXTENDED_COMMUNITIES"
             ));
@@ -2100,7 +2100,7 @@ impl Attribute for Ipv6ExtendedCommunitiesList {
         parser: &mut Parser<'_, Octs>,
         _pdu_parse_info: PduParseInfo
     ) -> Result<(), ParseError> {
-        if parser.remaining() % 20 != 0 {
+        if !parser.remaining().is_multiple_of(20) {
             return Err(ParseError::form_error(
                 "unexpected length for IPV6_EXTENDED_COMMUNITIES"
             ));
@@ -2173,7 +2173,7 @@ impl Attribute for LargeCommunitiesList {
         parser: &mut Parser<'_, Octs>,
         _pdu_parse_info: PduParseInfo
     ) -> Result<(), ParseError> {
-        if parser.remaining() % 12 != 0 {
+        if !parser.remaining().is_multiple_of(12) {
             return Err(ParseError::form_error(
                 "unexpected length for LARGE_COMMUNITIES"
             ));

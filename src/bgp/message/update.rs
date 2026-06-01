@@ -618,10 +618,10 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                 // peers must have negotiated that in the BGP OPENs, so we can
                 // assume there are no NLRI in the conventional parts of the
                 // PDU. We return the nexthop from the MP attribute.
-                if let Ok(Some((mp_afisafi, mp))) = self.mp_next_hop_tuple() {
-                    if mp_afisafi == AfiSafiType::Ipv4Unicast {
-                        return Ok(mp)
-                    }
+                if let Ok(Some((mp_afisafi, mp))) = self.mp_next_hop_tuple()
+                    && mp_afisafi == AfiSafiType::Ipv4Unicast
+                {
+                    return Ok(mp)
                 }
 
                 // If no MP_REACH_NLRI was found for Ipv4Unicast, we look for
@@ -1047,6 +1047,8 @@ pub struct SessionConfig {
     four_octet_asns: FourOctetAsns,
     ipv4unicast_in_mp: Ipv4UnicastInMp,
     addpath_fams: SessionAddpaths,
+    // TODO keep track of enabled MP AFISAFIs?
+    // see intersection in From<NegotiatedConfig> for SessionConfig in session.rs
 }
 
 /// Configuration parameters (state) to parse an individual UPDATE message.
@@ -1226,6 +1228,10 @@ impl SessionConfig {
     /// Returns true if IPv4 Unicast is carried as MultiProtocol attribute.
     pub fn ipv4_unicast_in_mp(&self) -> bool {
         self.ipv4unicast_in_mp.0
+    }
+
+    pub fn set_ipv4unicast_in_mp(&mut self) {
+        self.ipv4unicast_in_mp = Ipv4UnicastInMp(true)
     }
 
     /// Returns the FourOctetAsns setting.

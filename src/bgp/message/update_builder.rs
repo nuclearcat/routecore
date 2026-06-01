@@ -359,10 +359,10 @@ where
         // TODO add more 'quick returns' here, e.g. for MpUnreachNlri or
         // conventional withdrawals/announcements.
 
-        if let Some(b) = &self.announcements {
-            if b.announcements.len() * 2 > max {
-                return true;
-            }
+        if let Some(b) = &self.announcements
+            && b.announcements.len() * 2 > max
+        {
+            return true;
         }
         self.calculate_pdu_length(session_config) > max
     }
