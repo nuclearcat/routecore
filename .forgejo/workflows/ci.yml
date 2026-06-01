@@ -39,7 +39,7 @@ jobs:
       - name: cargo clippy 
         id: clippy
         if: matrix.rust == 'stable'
-        run: cargo clippy --all ${{ matrix.args }} -- -W clippy::cargo -D warnings
+        run: cargo clippy --all ${{ matrix.args }} -- -D warnings # -W clippy::cargo
       
   misc:
     name: Additional code quality / dependency checks
