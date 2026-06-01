@@ -1,23 +1,21 @@
 # Changelog
 
-## Unreleased version
+## 0.7.2
 
-Released yyyy-mm-dd.
-
-
-### Breaking changes
+Released 2026-06-01.
 
 
 ### New
 
-
-### Bug fixes
+* Added a helper to generate a `SessionConfig` from `NegotiatedConfig`.
 
 
 ### Other changes
 
-
-### Acknowledgements
+* Routecore moved from Github to Codeberg, for which CI workflows are included
+  and references in e.g. Cargo.toml are changed.
+* MSRV is bumped to 1.88.
+* Several Clippy related fixes.
 
 
 ## 0.7.1
