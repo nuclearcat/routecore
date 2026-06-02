@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased version
+
+Released yyyy-mm-dd.
+
+
+## Breaking changes
+
+## Bug fixes
+
+## New
+
+## Other changes
+
+
 ## 0.7.2
 
 Released 2026-06-01.
