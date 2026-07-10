@@ -1436,6 +1436,147 @@ impl Display for Ipv6ExtendedCommunity {
     }
 }
 
+//--- FlowSpec action extended communities -----------------------------------
+
+/// FlowSpec traffic filtering action, RFC 8955 §7 / RFC 8956 §5.
+///
+/// Decoded view of the extended communities that carry FlowSpec actions.
+/// Obtain one via [`ExtendedCommunity::flowspec`] or
+/// [`Ipv6ExtendedCommunity::flowspec`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum FlowSpecEc {
+    /// 0x8006: limit to N bytes/s; a rate of 0 means "drop".
+    TrafficRate { asn2: u16, rate_bytes_per_sec: f32 },
+    /// 0x8007: sample/log and/or terminal action.
+    TrafficAction { sample: bool, terminal: bool },
+    /// 0x8008: redirect to VRF (2-octet AS route-target form).
+    RedirectAs2 { asn2: u16, local: u32 },
+    /// 0x8108: redirect to VRF (IPv4-address route-target form).
+    RedirectIpv4 { ip: Ipv4Addr, local: u16 },
+    /// 0x8208: redirect to VRF (4-octet AS route-target form).
+    RedirectAs4 { asn4: u32, local: u16 },
+    /// 0x8009: remark DSCP.
+    TrafficMarking { dscp: u8 },
+    /// RFC 8956 §5: redirect to IPv6 (IPv6-address-specific, subtype 0x0d).
+    RedirectIpv6 { ip: Ipv6Addr, local: u16 },
+}
+
+impl FlowSpecEc {
+    /// Decode a regular (8-byte) extended community, if it is a FlowSpec
+    /// action.
+    pub fn from_extended(raw: [u8; 8]) -> Option<Self> {
+        match raw[0..2] {
+            [0x80, 0x06] => Some(FlowSpecEc::TrafficRate {
+                asn2: u16::from_be_bytes([raw[2], raw[3]]),
+                rate_bytes_per_sec: f32::from_be_bytes([
+                    raw[4], raw[5], raw[6], raw[7]
+                ]),
+            }),
+            [0x80, 0x07] => Some(FlowSpecEc::TrafficAction {
+                sample: raw[7] & 0x02 == 0x02,
+                terminal: raw[7] & 0x01 == 0x01,
+            }),
+            [0x80, 0x08] => Some(FlowSpecEc::RedirectAs2 {
+                asn2: u16::from_be_bytes([raw[2], raw[3]]),
+                local: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
+            }),
+            [0x81, 0x08] => Some(FlowSpecEc::RedirectIpv4 {
+                ip: Ipv4Addr::new(raw[2], raw[3], raw[4], raw[5]),
+                local: u16::from_be_bytes([raw[6], raw[7]]),
+            }),
+            [0x82, 0x08] => Some(FlowSpecEc::RedirectAs4 {
+                asn4: u32::from_be_bytes([raw[2], raw[3], raw[4], raw[5]]),
+                local: u16::from_be_bytes([raw[6], raw[7]]),
+            }),
+            [0x80, 0x09] => Some(FlowSpecEc::TrafficMarking {
+                dscp: raw[7] & 0x3f,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Decode an IPv6-address-specific (20-byte) extended community, if it
+    /// is a FlowSpec action (Redirect to IPv6, subtype 0x0d).
+    pub fn from_ipv6_extended(raw: [u8; 20]) -> Option<Self> {
+        // Transitive IPv6-Address-Specific (0x00), subtype 0x0d.
+        if raw[0] == 0x00 && raw[1] == 0x0d {
+            Some(FlowSpecEc::RedirectIpv6 {
+                ip: Ipv6Addr::from(
+                    <&[u8] as TryInto<[u8; 16]>>::try_into(&raw[2..18])
+                        .expect("fixed slice")
+                ),
+                local: u16::from_be_bytes([raw[18], raw[19]]),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+fn fmt_rate(f: &mut Formatter, rate: f32) -> Result<(), Error> {
+    if rate >= 1e9 {
+        write!(f, "{:.2} GB/s", rate / 1e9)
+    } else if rate >= 1e6 {
+        write!(f, "{:.2} MB/s", rate / 1e6)
+    } else if rate >= 1e3 {
+        write!(f, "{:.2} kB/s", rate / 1e3)
+    } else {
+        write!(f, "{} B/s", rate)
+    }
+}
+
+impl Display for FlowSpecEc {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        match self {
+            FlowSpecEc::TrafficRate { rate_bytes_per_sec, .. } => {
+                if *rate_bytes_per_sec <= 0.0 {
+                    write!(f, "drop")
+                } else {
+                    write!(f, "rate-limit ")?;
+                    fmt_rate(f, *rate_bytes_per_sec)
+                }
+            }
+            FlowSpecEc::TrafficAction { sample, terminal } => {
+                match (sample, terminal) {
+                    (true, true) => write!(f, "action sample,terminal"),
+                    (true, false) => write!(f, "action sample"),
+                    (false, true) => write!(f, "action terminal"),
+                    (false, false) => write!(f, "action none"),
+                }
+            }
+            FlowSpecEc::RedirectAs2 { asn2, local } => {
+                write!(f, "redirect vrf {}:{}", asn2, local)
+            }
+            FlowSpecEc::RedirectIpv4 { ip, local } => {
+                write!(f, "redirect vrf {}:{}", ip, local)
+            }
+            FlowSpecEc::RedirectAs4 { asn4, local } => {
+                write!(f, "redirect vrf {}:{}", asn4, local)
+            }
+            FlowSpecEc::TrafficMarking { dscp } => {
+                write!(f, "mark dscp {}", dscp)
+            }
+            FlowSpecEc::RedirectIpv6 { ip, local } => {
+                write!(f, "redirect vrf {}:{}", ip, local)
+            }
+        }
+    }
+}
+
+impl ExtendedCommunity {
+    /// Decode this community as a FlowSpec action, if it is one.
+    pub fn flowspec(self) -> Option<FlowSpecEc> {
+        FlowSpecEc::from_extended(self.to_raw())
+    }
+}
+
+impl Ipv6ExtendedCommunity {
+    /// Decode this community as a FlowSpec action, if it is one.
+    pub fn flowspec(self) -> Option<FlowSpecEc> {
+        FlowSpecEc::from_ipv6_extended(self.to_raw())
+    }
+}
+
 //--- LargeCommunity ---------------------------------------------------------
 
 /// Large Community as defined in RFC8092.
@@ -1706,6 +1847,102 @@ mod ser {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn flowspec_ec_decode_and_display() {
+        // traffic-rate 1000 bytes/s
+        let rate = FlowSpecEc::from_extended([
+            0x80, 0x06, 0x00, 0x00, 0x44, 0x7a, 0x00, 0x00, // 1000.0f32
+        ]).unwrap();
+        assert_eq!(
+            rate,
+            FlowSpecEc::TrafficRate { asn2: 0, rate_bytes_per_sec: 1000.0 }
+        );
+        assert_eq!(rate.to_string(), "rate-limit 1.00 kB/s");
+
+        // traffic-rate 0 == drop
+        let drop = FlowSpecEc::from_extended([
+            0x80, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]).unwrap();
+        assert_eq!(drop.to_string(), "drop");
+
+        // traffic-action sample+terminal
+        let action = FlowSpecEc::from_extended([
+            0x80, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+        ]).unwrap();
+        assert_eq!(
+            action,
+            FlowSpecEc::TrafficAction { sample: true, terminal: true }
+        );
+        assert_eq!(action.to_string(), "action sample,terminal");
+
+        // redirect vrf 65000:100 (2-octet AS form)
+        let redirect = FlowSpecEc::from_extended([
+            0x80, 0x08, 0xfd, 0xe8, 0x00, 0x00, 0x00, 0x64,
+        ]).unwrap();
+        assert_eq!(
+            redirect,
+            FlowSpecEc::RedirectAs2 { asn2: 65000, local: 100 }
+        );
+        assert_eq!(redirect.to_string(), "redirect vrf 65000:100");
+
+        // redirect IPv4 form
+        let r4 = FlowSpecEc::from_extended([
+            0x81, 0x08, 0x0a, 0x00, 0x00, 0x01, 0x00, 0x64,
+        ]).unwrap();
+        assert_eq!(r4.to_string(), "redirect vrf 10.0.0.1:100");
+
+        // redirect 4-octet AS form
+        let r4b = FlowSpecEc::from_extended([
+            0x82, 0x08, 0x00, 0x03, 0x0d, 0x40, 0x00, 0x64,
+        ]).unwrap();
+        assert_eq!(r4b.to_string(), "redirect vrf 200000:100");
+
+        // mark dscp 46
+        let mark = FlowSpecEc::from_extended([
+            0x80, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2e,
+        ]).unwrap();
+        assert_eq!(mark, FlowSpecEc::TrafficMarking { dscp: 46 });
+        assert_eq!(mark.to_string(), "mark dscp 46");
+
+        // not a flowspec community
+        assert!(FlowSpecEc::from_extended([
+            0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        ]).is_none());
+
+        // via the ExtendedCommunity accessor
+        let ec = ExtendedCommunity::from_raw([
+            0x80, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2e,
+        ]);
+        assert_eq!(
+            ec.flowspec(),
+            Some(FlowSpecEc::TrafficMarking { dscp: 46 })
+        );
+    }
+
+    #[test]
+    fn flowspec_ec_redirect_ipv6() {
+        let mut raw = [0u8; 20];
+        raw[0] = 0x00;
+        raw[1] = 0x0d;
+        raw[2..18].copy_from_slice(
+            &"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets()
+        );
+        raw[19] = 0x64;
+        let r6 = FlowSpecEc::from_ipv6_extended(raw).unwrap();
+        assert_eq!(
+            r6,
+            FlowSpecEc::RedirectIpv6 {
+                ip: "2001:db8::1".parse().unwrap(),
+                local: 100
+            }
+        );
+        assert_eq!(r6.to_string(), "redirect vrf 2001:db8::1:100");
+        // non-flowspec subtype
+        let mut other = raw;
+        other[1] = 0x02;
+        assert!(FlowSpecEc::from_ipv6_extended(other).is_none());
+    }
 
     #[test]
     fn macro_based() {

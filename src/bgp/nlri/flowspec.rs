@@ -1,6 +1,6 @@
 use std::{cmp, fmt};
 
-use log::debug;
+use inetnum::addr::Prefix;
 use octseq::{Octets, OctetsBuilder, Parser};
 
 use crate::util::parser::ParseError;
@@ -24,13 +24,84 @@ impl<Octs> FlowSpecNlri<Octs> {
     pub fn raw(&self) -> &Octs {
         &self.raw
     }
+
+    pub fn afi(&self) -> Afi {
+        self.afi
+    }
+}
+
+impl<Octs: AsRef<[u8]>> FlowSpecNlri<Octs> {
+    /// Copy into an NLRI backed by owned octets of type `T`.
+    pub fn to_owned_octets<T: From<Vec<u8>>>(&self) -> FlowSpecNlri<T> {
+        FlowSpecNlri {
+            afi: self.afi,
+            raw: T::from(self.raw.as_ref().to_vec()),
+        }
+    }
+}
+
+impl<Octs: Octets> FlowSpecNlri<Octs> {
+    /// Iterate over the typed components of this NLRI.
+    ///
+    /// Iteration stops after the first component that fails to parse; that
+    /// failure is yielded as the final `Err` item.
+    pub fn components(&self) -> ComponentIter<'_, Octs> {
+        ComponentIter {
+            parser: Parser::from_ref(&self.raw),
+            afi: self.afi,
+            errored: false,
+        }
+    }
+
+    /// The destination-prefix component (type 1) usable as an index key:
+    /// present for IPv4, or for IPv6 when the pattern offset is 0. `None`
+    /// when the component is absent, offset-anchored, or the NLRI is
+    /// malformed.
+    pub fn dst_prefix(&self) -> Option<Prefix> {
+        for c in self.components() {
+            match c {
+                Ok(Component::DestinationPrefix(p)) => return Some(p),
+                Ok(Component::DestinationPrefixV6 { prefix, offset: 0 }) => {
+                    return Some(prefix)
+                }
+                Ok(Component::DestinationPrefixV6 { .. }) => return None,
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+/// Iterator over the [`Component`]s of a [`FlowSpecNlri`].
+pub struct ComponentIter<'a, Octs: ?Sized> {
+    parser: Parser<'a, Octs>,
+    afi: Afi,
+    errored: bool,
+}
+
+impl<'a, Octs: Octets + ?Sized> Iterator for ComponentIter<'a, Octs> {
+    type Item = Result<Component<Octs::Range<'a>>, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.errored || self.parser.remaining() == 0 {
+            return None;
+        }
+        match Component::parse(&mut self.parser, self.afi) {
+            Ok(c) => Some(Ok(c)),
+            Err(e) => {
+                self.errored = true;
+                Some(Err(e))
+            }
+        }
+    }
 }
 
 impl<Octs: Octets> FlowSpecNlri<Octs> {
     pub fn parse<'a, R>(parser: &mut Parser<'a, R>, afi: Afi)
         -> Result<Self, ParseError>
     where
-        R: Octets<Range<'a> = Octs>
+        R: Octets<Range<'a> = Octs> + ?Sized
     {
         let len1 = parser.parse_u8()?;
         let len: u16 = if len1 >= 0xf0 {
@@ -48,15 +119,10 @@ impl<Octs: Octets> FlowSpecNlri<Octs> {
         }
 
         match afi {
-            Afi::Ipv4 => {
+            Afi::Ipv4 | Afi::Ipv6 => {
                 while parser.pos() < pos + len as usize {
-                    Component::parse(parser)?;
+                    Component::parse(parser, afi)?;
                 }
-            }
-            Afi::Ipv6 => {
-                debug!("FlowSpec v6 not implemented yet, \
-                      returning unchecked NLRI"
-                );
             }
             _ => {
                 return Err(ParseError::form_error("illegal AFI for FlowSpec"))
@@ -126,8 +192,36 @@ impl<Octs: AsRef<[u8]>> Ord for FlowSpecNlri<Octs> {
     }
 }
 
-impl<T> fmt::Display for FlowSpecNlri<T> {
+impl<Octs: AsRef<[u8]>> fmt::Display for FlowSpecNlri<Octs> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FLOWSPEC-NLRI")
+        let raw = self.raw.as_ref();
+        let mut parser = Parser::from_ref(raw);
+        let mut first = true;
+        while parser.remaining() > 0 {
+            match Component::<&[u8]>::parse(&mut parser, self.afi) {
+                Ok(c) => {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{}", c)?;
+                }
+                Err(_) => {
+                    // Never fail on hostile bytes; fall back to hex.
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "flowspec-raw(")?;
+                    for b in raw {
+                        write!(f, "{:02x}", b)?;
+                    }
+                    return write!(f, ")");
+                }
+            }
+        }
+        if first {
+            write!(f, "flowspec-empty")?;
+        }
+        Ok(())
     }
 }

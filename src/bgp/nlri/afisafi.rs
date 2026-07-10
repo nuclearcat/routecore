@@ -140,7 +140,8 @@ macro_rules! addpath {
 
     impl$(<$gen: AsRef<[u8]>>)? Eq for [<$nlri AddpathNlri>]$(<$gen>)? { }
 
-    impl$(<$gen>)? fmt::Display for [<$nlri AddpathNlri>]$(<$gen>)? {
+    impl$(<$gen: AsRef<[u8]>>)? fmt::Display for [<$nlri AddpathNlri>]$(<$gen>)?
+    where [<$nlri Nlri>]$(<$gen>)?: fmt::Display {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             write!(f, "[{}] ", self.0)?;
             fmt::Display::fmt(&self.1, f)
@@ -315,7 +316,7 @@ paste! {
         }
     }
 
-    impl<T> fmt::Display for Nlri<T> {
+    impl<T: AsRef<[u8]>> fmt::Display for Nlri<T> {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             match self {
             $($(
@@ -1043,6 +1044,13 @@ impl<T> From<Ipv4FlowSpecNlri<T>> for FlowSpecNlri<T> {
     }
 }
 
+impl<T> From<FlowSpecNlri<T>> for Ipv4FlowSpecNlri<T> {
+    fn from(value: FlowSpecNlri<T>) -> Self {
+        debug_assert!(value.afi() == Afi::Ipv4);
+        Ipv4FlowSpecNlri(value)
+    }
+}
+
 impl<Octs, Other> PartialEq<Ipv4FlowSpecNlri<Other>> for Ipv4FlowSpecNlri<Octs>
 where Octs: AsRef<[u8]>,
       Other: AsRef<[u8]>
@@ -1410,6 +1418,13 @@ impl<Octs: AsRef<[u8]>> NlriCompose for Ipv6FlowSpecNlri<Octs> {
 impl<T> From<Ipv6FlowSpecNlri<T>> for FlowSpecNlri<T> {
     fn from(value: Ipv6FlowSpecNlri<T>) -> Self {
         value.0
+    }
+}
+
+impl<T> From<FlowSpecNlri<T>> for Ipv6FlowSpecNlri<T> {
+    fn from(value: FlowSpecNlri<T>) -> Self {
+        debug_assert!(value.afi() == Afi::Ipv6);
+        Ipv6FlowSpecNlri(value)
     }
 }
 
@@ -1800,7 +1815,7 @@ mod tests {
     #[test]
     fn display() {
         let p =  Prefix::from_str("1.2.3.0/24").unwrap();
-        let n: Nlri<()> = Ipv4UnicastNlri(p).into();
+        let n: Nlri<Vec<u8>> = Ipv4UnicastNlri(p).into();
         assert_eq!(n.to_string(), p.to_string());
     }
 
