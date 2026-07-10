@@ -26,6 +26,21 @@ use super::timers::Timer;
 #[allow(unused_imports)]
 use super::util::to_pcap;
 
+fn negotiated_addpaths(
+    local: &[AfiSafiType],
+    remote: &[(AfiSafiType, AddpathDirection)],
+) -> Vec<AddpathFamDir> {
+    remote
+        .iter()
+        .filter(|(fam, _)| local.contains(fam))
+        .filter_map(|(fam, dir)| {
+            AddpathDirection::SendReceive
+                .merge(*dir)
+                .map(|dir| AddpathFamDir::new(*fam, dir))
+        })
+        .collect()
+}
+
 //------------ Session -------------------------------------------------------
 /// BGP Session holding the FSM and (local/negotiated) configuration.
 ///
@@ -978,14 +993,10 @@ impl<C: BgpConfig + Send> Session<C> {
 
                 let received_addpaths = open_msg.addpath_families_vec()
                     .map_err(|_| Error { msg: "failed to parse addpath caps" })?;
-                let intersection = received_addpaths.iter().filter(|(fam, dir)|{
-                    matches!(
-                        dir,
-                        AddpathDirection::Send |
-                        AddpathDirection::SendReceive
-                    ) &&
-                    self.config.addpath().contains(fam)
-                }).map(|(fam, dir)| AddpathFamDir::new(*fam, *dir)).collect::<Vec<_>>();
+                let intersection = negotiated_addpaths(
+                    &self.config.addpath(),
+                    &received_addpaths,
+                );
                 debug!("addpath intersection: {:?}", &intersection);
 
 
@@ -1279,14 +1290,10 @@ impl<C: BgpConfig + Send> Session<C> {
 
                 let received_addpaths = open_msg.addpath_families_vec()
                     .map_err(|_| Error { msg: "failed to parse addpath caps" })?;
-                let intersection = received_addpaths.iter().filter(|(fam, dir)|{
-                    matches!(
-                        dir,
-                        AddpathDirection::Send |
-                        AddpathDirection::SendReceive
-                    ) &&
-                    self.config.addpath().contains(fam)
-                }).map(|(fam, dir)| AddpathFamDir::new(*fam, *dir)).collect::<Vec<_>>();
+                let intersection = negotiated_addpaths(
+                    &self.config.addpath(),
+                    &received_addpaths,
+                );
                 debug!("addpath intersection: {:?}", &intersection);
 
                 let negotiated = NegotiatedConfig {
@@ -2267,3 +2274,36 @@ mod tests {
 
 }
 */
+
+#[cfg(test)]
+mod negotiated_addpaths_tests {
+    use super::*;
+
+    #[test]
+    fn directions_are_from_the_local_perspective() {
+        let family = AfiSafiType::Ipv4Unicast;
+
+        for (remote, expected_local) in [
+            (AddpathDirection::Send, AddpathDirection::Receive),
+            (AddpathDirection::Receive, AddpathDirection::Send),
+            (
+                AddpathDirection::SendReceive,
+                AddpathDirection::SendReceive,
+            ),
+        ] {
+            assert_eq!(
+                negotiated_addpaths(&[family], &[(family, remote)]),
+                vec![AddpathFamDir::new(family, expected_local)]
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_families_not_enabled_locally() {
+        assert!(negotiated_addpaths(
+            &[AfiSafiType::Ipv4Unicast],
+            &[(AfiSafiType::Ipv6Unicast, AddpathDirection::SendReceive)]
+        )
+        .is_empty());
+    }
+}
