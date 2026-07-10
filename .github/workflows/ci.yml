@@ -1,72 +1,82 @@
-name: ci
-on: [push, pull_request]
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: test
+    name: Test (${{ matrix.os }}, Rust ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
-        rust: [1.85, stable, beta]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [1.88.0, stable, beta]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v1
-      - name: Install Rust
-        uses: hecrj/setup-rust-action@v1
+        uses: actions/checkout@v4
         with:
-          rust-version: ${{ matrix.rust }}
+          persist-credentials: false
 
-      # Clippy.
-      #
-      # We run Clippy for stable and beta only, to minimize the possibility of a
-      # lint requiring something in the MSRV but the opposite thing in stable,
-      # or vice versa.
-      #
-      # For stable, error out on warnings.
-      - if: matrix.rust == 'stable'
-        run: |
-          rustup component add clippy
-          cargo clippy --all --all-features -- -D warnings # -W clippy::cargo
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
 
-      #- if: matrix.rust == 'beta'
-      #  run: rustup component add clippy
+      - name: Build with default features
+        run: cargo build --verbose --all
 
-      ## For beta, turn warnings into GitHub annotations.
-      #- if: matrix.rust == 'beta'
-      #  uses: mathiasvr/command-output@v2.0.0
-      #  id: clippy_beta
-      #  with:
-      #    run: |
-      #      # We can warn on additional lints. cargo::nursery might make sense.
-      #      # XXX currently this only shows the first line of output. Also see
-      #      # https://github.com/actions/toolkit/issues/193
-      #      # Replacing '\n' with "%0A" might be a workaround.
-      #      cargo clippy --all --all-features -q --message-format short -- \
-      #      -W clippy::cargo # -W clippy::nursery
+      - name: Build with all features
+        run: cargo build --verbose --all --all-features
 
-      #- if: ${{ steps.clippy_beta.outputs.stderr }}
-      #  env:
-      #    clippy_warnings: ${{ steps.clippy_beta.outputs.stderr }}
-      #  run: echo "::warning ::$clippy_warnings"
+      - name: Test with default features
+        run: cargo test --verbose --all
 
+      - name: Test with all features
+        run: cargo test --verbose --all --all-features
 
-      # Because of all the features, we run build and test twice -- once with
-      # full features and once without any features at all -- to make it more
-      # likely that everything works.
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      # Build
-      - run: cargo build --verbose --all --all-features
-      - run: cargo build --verbose --all
+      - name: Install stable Rust with Clippy
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
 
-      # Test
-      - run: cargo test --verbose --all --all-features
-      - run: cargo test --verbose --all
+      - name: Run Clippy
+        run: cargo clippy --all --all-features -- -D warnings
 
-      # Test using minimal dependency versions from Cargo.toml
-      - if: matrix.rust != 'beta'
-        run: |
-          rustup toolchain install nightly
-          cargo +nightly update -Z minimal-versions
-          cargo build --verbose --all --all-features
-          cargo test --verbose --all --all-features
-        name: Check and test with minimal-versions
+  minimal-versions:
+    name: Minimal dependency versions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+
+      - name: Resolve minimal dependency versions
+        run: cargo +nightly update -Z minimal-versions
+
+      - name: Build with minimal dependency versions
+        run: cargo +nightly build --verbose --all --all-features
+
+      - name: Test with minimal dependency versions
+        run: cargo +nightly test --verbose --all --all-features
