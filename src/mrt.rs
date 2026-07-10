@@ -41,6 +41,10 @@ pub struct CommonHeader<'a, Octs> {
     message: Parser<'a, Octs>
 }
 impl<Octs: Octets> CommonHeader<'_, Octs> {
+    pub fn timestamp(&self) -> u32 {
+        self.timestamp
+    }
+
     pub fn length(&self) -> u32  {
         self.length
     }
@@ -56,34 +60,37 @@ impl<'a, Octs: Octets> CommonHeader<'a, Octs> {
     pub fn parse(parser: &mut Parser<'a, Octs>) -> Result<Self, ParseError> {
         let timestamp = parser.parse_u32_be()?;
         let msg_type = parser.parse_u16_be()?.into();
+        let raw_subtype = parser.parse_u16_be()?;
+        let length = parser.parse_u32_be()?;
         let msg_subtype = match msg_type {
             MessageType::TableDumpv2 => {
                 MessageSubType::TableDumpv2SubType(
-                    parser.parse_u16_be()?.into()
+                    raw_subtype.into()
                 )
             }
             MessageType::Bgp4Mp | MessageType::Bgp4MpEt => {
                 MessageSubType::Bgp4MpSubType(
-                    parser.parse_u16_be()?.into()
+                    raw_subtype.into()
                 )
             }
-            _ => {
-                log::error!("no support for {msg_type}");
-                return Err(ParseError::Unsupported);
-            }
+            _ => MessageSubType::Unsupported(msg_type, raw_subtype),
         };
 
-        let length = parser.parse_u32_be()?;
-        let (timestamp_mus, length) = match msg_type {
+        let (timestamp_mus, message_length) = match msg_type {
             MessageType::Bgp4MpEt
                 | MessageType::IsisEt
                 | MessageType::Ospfv3Et => {
-                    (parser.parse_u32_be()?, length - 4 )
+                    let message_length = length.checked_sub(4).ok_or_else(|| {
+                        ParseError::form_error(
+                            "extended-timestamp MRT record shorter than 4 bytes"
+                        )
+                    })?;
+                    (parser.parse_u32_be()?, message_length)
                 }
                 _ => (0, length)
         };
 
-        let message = parser.parse_parser(length as usize)?;
+        let message = parser.parse_parser(message_length as usize)?;
 
         Ok( CommonHeader {
                 timestamp,
@@ -137,6 +144,7 @@ typeenum!(MessageType, u16,
 pub enum MessageSubType {
     TableDumpv2SubType(TableDumpv2SubType),
     Bgp4MpSubType(Bgp4MpSubType),
+    Unsupported(MessageType, u16),
 }
 
 typeenum!(TableDumpv2SubType, u16,
@@ -518,6 +526,45 @@ impl<'a> MrtFile<'a> {
         let parser = Parser::from_ref(&self.raw);
         UpdateIterator { parser }
     }
+
+    /// Returns all MRT records, including types that Routecore does not
+    /// decode beyond their common header.
+    ///
+    /// Unsupported record types are returned with
+    /// [`MessageSubType::Unsupported`] so their length-delimited bodies can
+    /// be skipped without losing framing. A malformed header or body length
+    /// is returned as an error and fuses the iterator.
+    pub fn records(&self) -> RecordIterator<'a, &[u8]> {
+        RecordIterator {
+            parser: Parser::from_ref(&self.raw),
+            fused: false,
+        }
+    }
+}
+
+//------------ RecordIterator ------------------------------------------------
+
+pub struct RecordIterator<'a, Octs> {
+    parser: Parser<'a, Octs>,
+    fused: bool,
+}
+
+impl<'a, Octs: Octets> Iterator for RecordIterator<'a, Octs> {
+    type Item = Result<CommonHeader<'a, Octs>, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.fused || self.parser.remaining() == 0 {
+            return None;
+        }
+
+        match CommonHeader::parse(&mut self.parser) {
+            Ok(record) => Some(Ok(record)),
+            Err(err) => {
+                self.fused = true;
+                Some(Err(err))
+            }
+        }
+    }
 }
 
 //------------ UpdateIterator ------------------------------------------------
@@ -875,9 +922,9 @@ impl<'a, Octs: Octets> Iterator for UpdateIterator<'a, Octs> {
                         eprintln!("{e}")
                     ).ok().map(Into::into)
                 }
-                Bgp4MpSubType::MessageLocal => todo!(),
-                Bgp4MpSubType::MessageAs4Local => todo!(),
-                Bgp4MpSubType::Unimplemented(_) => todo!(),
+                Bgp4MpSubType::MessageLocal
+                | Bgp4MpSubType::MessageAs4Local
+                | Bgp4MpSubType::Unimplemented(_) => continue,
             };
 
             if res.is_none() {
@@ -1250,3 +1297,58 @@ mod tests {
     }
 }
 */
+
+#[cfg(test)]
+mod record_iterator_tests {
+    use super::*;
+
+    fn record(timestamp: u32, typ: u16, subtype: u16, body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&timestamp.to_be_bytes());
+        bytes.extend_from_slice(&typ.to_be_bytes());
+        bytes.extend_from_slice(&subtype.to_be_bytes());
+        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn unsupported_records_preserve_framing() {
+        let mut bytes = record(10, 11, 7, &[1, 2, 3]);
+        bytes.extend(record(11, 12, 3, &[4, 5]));
+
+        let file = MrtFile::new(&bytes);
+        let records = file.records().collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].as_ref().unwrap().timestamp(), 10);
+        assert!(matches!(
+            records[0].as_ref().unwrap().subtype(),
+            MessageSubType::Unsupported(MessageType::Ospfv2, 7)
+        ));
+        assert!(matches!(
+            records[1].as_ref().unwrap().subtype(),
+            MessageSubType::Unsupported(MessageType::TableDump, 3)
+        ));
+    }
+
+    #[test]
+    fn invalid_length_returns_one_error_and_fuses() {
+        let mut bytes = record(10, 11, 0, &[1, 2]);
+        bytes[8..12].copy_from_slice(&5u32.to_be_bytes());
+
+        let file = MrtFile::new(&bytes);
+        let mut records = file.records();
+        assert!(records.next().unwrap().is_err());
+        assert!(records.next().is_none());
+    }
+
+    #[test]
+    fn short_extended_timestamp_returns_error() {
+        let bytes = record(10, 17, 4, &[1, 2, 3]);
+        let file = MrtFile::new(&bytes);
+        let mut records = file.records();
+
+        assert!(records.next().unwrap().is_err());
+        assert!(records.next().is_none());
+    }
+}
