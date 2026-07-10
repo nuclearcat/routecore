@@ -282,14 +282,9 @@ impl<C: BgpConfig + Send> Session<C> {
                         let _ = resp.send(self.attributes);
                     }
                     Command::GetSessionConfig{resp} => {
-                        // TODO get rid of clone ideally
-                        let _ = resp.send(self.negotiated.as_ref()
-                            .map(|n| SessionConfig::from(n.clone()))
-                            .unwrap_or_else(||{
-                                warn!("defaulting to modern()");
-                                SessionConfig::modern()
-                            })
-                        );
+                        let config = self.negotiated.as_ref()
+                            .map(SessionConfig::from);
+                        let _ = resp.send(config);
                     }
                     Command::Disconnect(reason) => {
                         self.disconnect(reason);
@@ -1864,7 +1859,7 @@ pub enum Command {
         resp: oneshot::Sender<SessionAttributes>,
     },
     GetSessionConfig {
-        resp: oneshot::Sender<SessionConfig>,
+        resp: oneshot::Sender<Option<SessionConfig>>,
     },
     Disconnect(DisconnectReason),
     ForcedKeepalive,
@@ -2104,6 +2099,12 @@ pub struct NegotiatedConfig {
 
 impl From<NegotiatedConfig> for SessionConfig {
     fn from(value: NegotiatedConfig) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<&NegotiatedConfig> for SessionConfig {
+    fn from(value: &NegotiatedConfig) -> Self {
         debug!("{:?}", value.local_capabilities);
         debug!("{:?}", value.remote_capabilities);
         let local_caps = Capabilities(&value.local_capabilities);
