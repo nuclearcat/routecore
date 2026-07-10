@@ -1027,17 +1027,75 @@ where
 
 //------------ RibEntryIterator -----------------------------------------------
 
+/// The NLRI a TABLE_DUMP_V2 RIB entry is keyed on.
+#[derive(Clone, Debug)]
+pub enum RibEntryNlri {
+    /// RIB_IPV4_UNICAST / RIB_IPV6_UNICAST.
+    Prefix(Prefix),
+    /// RIB_GENERIC with a FlowSpec AFI/SAFI: the raw FlowSpec NLRI bytes
+    /// (without the length header), i.e. `FlowSpecNlri::raw()`.
+    FlowSpec(Vec<u8>),
+}
+
+impl fmt::Display for RibEntryNlri {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            RibEntryNlri::Prefix(p) => write!(f, "{}", p),
+            RibEntryNlri::FlowSpec(raw) => {
+                write!(f, "flowspec(")?;
+                for b in raw {
+                    write!(f, "{:02x}", b)?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+/// Parse a RIB_GENERIC entry header (RFC 6396 §4.3.3). Returns `Ok(None)`
+/// for AFI/SAFIs whose NLRI we cannot frame (only FlowSpec is supported),
+/// so the caller can skip the record instead of failing.
+fn parse_rib_generic_header<'a, Octs: Octets>(
+    parser: &mut Parser<'a, Octs>,
+) -> Result<Option<(AfiSafiType, RibEntryNlri, Parser<'a, Octs>)>, ParseError>
+{
+    let _seq_number = parser.parse_u32_be()?;
+    let afi = parser.parse_u16_be()?;
+    let safi = parser.parse_u8()?;
+    match (afi, safi) {
+        (1, 133) | (2, 133) => {
+            let nlri = crate::bgp::nlri::flowspec::FlowSpecNlri::parse(
+                parser,
+                if afi == 1 { Afi::Ipv4 } else { Afi::Ipv6 },
+            )?;
+            let _entry_count = parser.parse_u16_be()?;
+            let entries = parser.parse_parser(parser.remaining())?;
+            let afisafi = if afi == 1 {
+                AfiSafiType::Ipv4FlowSpec
+            } else {
+                AfiSafiType::Ipv6FlowSpec
+            };
+            Ok(Some((
+                afisafi,
+                RibEntryNlri::FlowSpec(nlri.raw().as_ref().to_vec()),
+                entries,
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub struct RibEntryIterator<'a, Octs> {
     peer_index: PeerIndex,
     parser: Parser<'a, Octs>,
-    current_table: Option<RibEntryHeader<'a, Octs>>,
+    current_table: Option<(RibEntryNlri, Parser<'a, Octs>)>,
     current_afisafi: Option<AfiSafiType>,
 }
 impl<'a, Octs> RibEntryIterator<'a, Octs> {
     fn new(peer_index: PeerIndex, parser: Parser<'a, Octs>) -> Self {
         Self {
             peer_index,
-            parser, 
+            parser,
             current_table: None,
             current_afisafi: None,
         }
@@ -1049,11 +1107,11 @@ impl<'a, Octs: Octets> Iterator for RibEntryIterator<'a, Octs>
 where
     Vec<u8>: OctetsFrom<Octs::Range<'a>>
 {
-    type Item = (AfiSafiType, u16, PeerEntry, Prefix, Vec<u8>);
+    type Item = (AfiSafiType, u16, PeerEntry, RibEntryNlri, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item>
     {
-        if self.current_table.is_none() {
+        while self.current_table.is_none() {
             if self.parser.remaining() == 0 {
                 return None;
             }
@@ -1066,41 +1124,63 @@ where
                         let reh = RibEntryHeader::parse(
                             &mut m.message, Afi::Ipv4
                         ).unwrap();
-                        self.current_table = Some(reh);
+                        let entries = reh.entries;
+                        self.current_table = Some((
+                            RibEntryNlri::Prefix(reh.prefix()),
+                            entries,
+                        ));
                         self.current_afisafi = Some(AfiSafiType::Ipv4Unicast);
                     }
                     TableDumpv2SubType::RibIpv6Unicast => {
                         let reh = RibEntryHeader::parse(
                             &mut m.message, Afi::Ipv6
                         ).unwrap();
-                        self.current_table = Some(reh);
+                        let entries = reh.entries;
+                        self.current_table = Some((
+                            RibEntryNlri::Prefix(reh.prefix()),
+                            entries,
+                        ));
                         self.current_afisafi = Some(AfiSafiType::Ipv6Unicast);
                     }
-                    _ => todo!()
+                    TableDumpv2SubType::RibGeneric => {
+                        match parse_rib_generic_header(&mut m.message) {
+                            Ok(Some((afisafi, nlri, entries))) => {
+                                self.current_table = Some((nlri, entries));
+                                self.current_afisafi = Some(afisafi);
+                            }
+                            // Unsupported family or malformed record:
+                            // skip it rather than panic.
+                            Ok(None) | Err(_) => continue,
+                        }
+                    }
+                    // Peer index tables, multicast RIBs and unknown
+                    // subtypes: skip the record instead of panicking (the
+                    // record body was already consumed by
+                    // CommonHeader::parse on the outer parser).
+                    _ => continue,
                 }
             }
         }
 
-        let mut table = self.current_table.take().unwrap();
-        let re = RibEntry::parse(&mut table.entries).unwrap();
+        let (nlri, mut entries) = self.current_table.take().unwrap();
+        let re = RibEntry::parse(&mut entries).unwrap();
         let peer = self.peer_index.get(&re).unwrap();
         // XXX here we probably need a PduParseInfo::mrt()
-        let prefix = table.prefix;
 
         let mut v = re.attributes;
         let mut raw_attr = vec![0; v.remaining()];
         let _ = v.parse_buf(&mut raw_attr[..]);
 
 
-        if table.entries.remaining() != 0 {
-            self.current_table = Some(table);
-        } 
+        if entries.remaining() != 0 {
+            self.current_table = Some((nlri.clone(), entries));
+        }
 
         Some((
             *self.current_afisafi.as_ref().unwrap(),
             re.peer_idx,
             *peer,
-            prefix,
+            nlri,
             raw_attr
         ))
     }
