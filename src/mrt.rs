@@ -37,12 +37,19 @@ pub struct CommonHeader<'a, Octs> {
     msg_type: MessageType,
     msg_subtype: MessageSubType,
     length: u32,
-    timestamp_mus: u32, // only set in Extended Timestamp message types (_ET)
+    timestamp_mus: Option<u32>,
     message: Parser<'a, Octs>
 }
 impl<Octs: Octets> CommonHeader<'_, Octs> {
     pub fn timestamp(&self) -> u32 {
         self.timestamp
+    }
+
+    /// Returns the microsecond timestamp carried by an extended-timestamp
+    /// record, or `None` for regular records and malformed ET bodies that are
+    /// too short to carry it.
+    pub fn timestamp_micros(&self) -> Option<u32> {
+        self.timestamp_mus
     }
 
     pub fn length(&self) -> u32  {
@@ -76,21 +83,19 @@ impl<'a, Octs: Octets> CommonHeader<'a, Octs> {
             _ => MessageSubType::Unsupported(msg_type, raw_subtype),
         };
 
-        let (timestamp_mus, message_length) = match msg_type {
+        let mut message = parser.parse_parser(length as usize)?;
+        let timestamp_mus = match msg_type {
             MessageType::Bgp4MpEt
                 | MessageType::IsisEt
                 | MessageType::Ospfv3Et => {
-                    let message_length = length.checked_sub(4).ok_or_else(|| {
-                        ParseError::form_error(
-                            "extended-timestamp MRT record shorter than 4 bytes"
-                        )
-                    })?;
-                    (parser.parse_u32_be()?, message_length)
+                    if message.remaining() >= 4 {
+                        Some(message.parse_u32_be()?)
+                    } else {
+                        None
+                    }
                 }
-                _ => (0, length)
+                _ => None
         };
-
-        let message = parser.parse_parser(message_length as usize)?;
 
         Ok( CommonHeader {
                 timestamp,
@@ -1343,12 +1348,13 @@ mod record_iterator_tests {
     }
 
     #[test]
-    fn short_extended_timestamp_returns_error() {
+    fn short_extended_timestamp_preserves_framing() {
         let bytes = record(10, 17, 4, &[1, 2, 3]);
         let file = MrtFile::new(&bytes);
         let mut records = file.records();
 
-        assert!(records.next().unwrap().is_err());
+        let record = records.next().unwrap().unwrap();
+        assert_eq!(record.timestamp_micros(), None);
         assert!(records.next().is_none());
     }
 }

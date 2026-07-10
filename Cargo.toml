@@ -27,6 +27,7 @@ serde_with  = { version = "3" }
 
 [dev-dependencies]
 memmap2         = "0.9"
+mrtgen          = { git = "https://github.com/fastnetmon/mrtgen", rev = "02fdb5a59ca7a9d344d229e0bde58fa423ccfd62" }
 serde_json      = "1"
 
 [features]
@@ -36,4 +37,3 @@ bmp = ["bgp", "chrono"]
 fsm = ["tokio"]
 mrt = ["bgp", "fsm", "rayon", "serde"]
 bgpsec = []
-
