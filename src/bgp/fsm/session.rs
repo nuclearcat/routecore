@@ -40,6 +40,14 @@ fn negotiated_addpaths(
         .collect()
 }
 
+fn negotiated_timer_intervals(hold_time: u16) -> Option<(u64, u64)> {
+    if hold_time == 0 {
+        None
+    } else {
+        Some((u64::from(hold_time), u64::from(hold_time / 3).max(1)))
+    }
+}
+
 //------------ Session -------------------------------------------------------
 /// BGP Session holding the FSM and (local/negotiated) configuration.
 ///
@@ -472,6 +480,22 @@ impl<C: BgpConfig + Send> Session<C> {
     /// Sets the hold time.
     pub fn set_hold_time(&mut self, time: u16) {
         self.attributes_mut().set_hold_time(time);
+        self.configure_timers(time);
+    }
+
+    fn configure_timers(&mut self, hold_time: u16) {
+        let (hold_interval, keepalive_interval) =
+            negotiated_timer_intervals(hold_time).unwrap_or((0, 0));
+        self.hold_timer = Timer::new(hold_interval);
+        self.keepalive_timer = Timer::new(keepalive_interval);
+    }
+
+    fn start_negotiated_timers(&mut self, hold_time: u16) {
+        self.configure_timers(hold_time);
+        if hold_time != 0 {
+            self.keepalive_timer.start();
+            self.hold_timer.start();
+        }
     }
 
     /// Enable the Delay Open Timer for this session.
@@ -1014,6 +1038,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 };
 
                 self.set_negotiated_config(negotiated.clone());
+                let negotiated_hold_time = negotiated.hold_time;
                 debug!(
                     "Negotiated: {}@{} id {:?}, hold time {}s",
                     negotiated.remote_asn,
@@ -1031,7 +1056,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 //- if the HoldTimer value is non-zero,
 
                     //- starts the KeepaliveTimer to initial value,
-                self.keepalive_timer.start();
+                self.start_negotiated_timers(negotiated_hold_time);
 
                     //- resets the HoldTimer to the negotiated value,
 
@@ -1040,8 +1065,6 @@ impl<C: BgpConfig + Send> Session<C> {
                     //- resets the KeepaliveTimer (set to zero),
 
                     //- resets the HoldTimer to zero, and
-                self.hold_timer.start();
-
                 //- changes its state to OpenConfirm.
                 self.set_state(State::OpenConfirm);
 
@@ -1318,6 +1341,7 @@ impl<C: BgpConfig + Send> Session<C> {
 
 
                 self.set_negotiated_config(negotiated.clone());
+                let negotiated_hold_time = negotiated.hold_time;
                 let _ = self.channel.send(Message::SessionNegotiated(negotiated)).await;
 
                 //- sends a KEEPALIVE message, and
@@ -1331,15 +1355,13 @@ impl<C: BgpConfig + Send> Session<C> {
                 // "internal" connection; otherwise, it is an "external"
                 // connection.  (This will impact UPDATE processing as
                 // described below.)
-                self.keepalive_timer.start();
+                self.start_negotiated_timers(negotiated_hold_time);
 
                 //- sets the HoldTimer according to the negotiated value (see
                 //  Section 4.2),
                 //
                 //  Not very clear from the standard if we also need to
                 //  actually start it, but it makes sense to do so.
-                self.hold_timer.start();
-
                 //- changes its state to OpenConfirm.
                 self.set_state(State::OpenConfirm);
             }
@@ -2401,6 +2423,13 @@ mod tests {
 #[cfg(test)]
 mod negotiated_addpaths_tests {
     use super::*;
+
+    #[test]
+    fn negotiated_hold_time_controls_timer_intervals() {
+        assert_eq!(negotiated_timer_intervals(0), None);
+        assert_eq!(negotiated_timer_intervals(3), Some((3, 1)));
+        assert_eq!(negotiated_timer_intervals(90), Some((90, 30)));
+    }
 
     fn header(message_type: u8, length: u16) -> BytesMut {
         let mut bytes = vec![0xff; 19];
