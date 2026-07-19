@@ -17,7 +17,7 @@ use crate::bgp::communities::{
 use crate::bgp::message::MsgType;
 use crate::bgp::path_attributes::{
     AggregatorInfo, PathAttributes, PathAttributeType,
-    WireformatPathAttribute, UncheckedPathAttributes,
+    WireformatPathAttribute, UncheckedPathAttributes, validate_mp_unreach,
 };
 use crate::bgp::types::{
     LocalPref, MultiExitDisc, NextHop, OriginType, AfiSafiType, AddpathDirection,
@@ -936,12 +936,6 @@ impl<Octs: Octets> UpdateMessage<Octs> {
             let pas_parser = parser.parse_parser(
                 attributes_len.into()
             )?;
-            // XXX this calls `validate` on every attribute, do we want to
-            // error on that level here?
-            for pa in PathAttributes::new(pas_parser, PduParseInfo::default()) {
-               pa?;
-            }
-
             let pas = UncheckedPathAttributes::from_parser(pas_parser);
             for pa in pas {
                 match pa.type_code() {
@@ -965,6 +959,20 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                         // Any other attribute else we want to validate or
                         // peek in here already?
                     }
+                }
+            }
+
+            let ppi = PduParseInfo::from_session_config(
+                session_config,
+                mp_reach_afisafi,
+                mp_unreach_afisafi,
+            );
+            for pa in PathAttributes::new(pas_parser, ppi) {
+                pa?;
+            }
+            for pa in UncheckedPathAttributes::from_parser(pas_parser) {
+                if pa.type_code() == 15 {
+                    validate_mp_unreach(&mut pa.value_into_parser(), ppi)?;
                 }
             }
         }
@@ -2665,7 +2673,7 @@ mod tests {
         );
     }
 
-    #[ignore = "from_octets currently does not validate the attributes"] 
+    #[ignore = "requires RFC 7606 malformed attribute-list disposition"]
     #[test]
     fn invalid_mp_unreach_nlri() {
         let raw = vec![
@@ -2675,6 +2683,20 @@ mod tests {
             0, 0, 1, 0, 255, 255, 255, 254
         ];
         print_pcap(&raw);
+
+        assert!(
+            UpdateMessage::from_octets(&raw, &SessionConfig::modern()).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_nlri_inside_mp_unreach() {
+        let mut raw = vec![0xff; 16];
+        raw.extend_from_slice(&30u16.to_be_bytes());
+        raw.push(2);
+        raw.extend_from_slice(&0u16.to_be_bytes());
+        raw.extend_from_slice(&7u16.to_be_bytes());
+        raw.extend_from_slice(&[0x80, 15, 4, 0, 1, 1, 32]);
 
         assert!(
             UpdateMessage::from_octets(&raw, &SessionConfig::modern()).is_err()

@@ -17,9 +17,34 @@ use crate::bgp::message::update_builder::{
     StandardCommunitiesList
 };
 use crate::bgp::communities::StandardCommunity;
-use crate::bgp::nlri::afisafi::{AfiSafiType, NlriCompose};
+use crate::bgp::nlri::afisafi::{AfiSafiType, NlriCompose, NlriEnumIter};
 use crate::bgp::types::NextHop;
 use crate::util::parser::{ParseError, parse_ipv4addr};
+
+fn validate_mp_nlri<Octs: Octets>(
+    parser: Parser<'_, Octs>,
+    afisafi: AfiSafiType,
+    addpath: bool,
+) -> Result<(), ParseError> {
+    if matches!(afisafi, AfiSafiType::Unsupported(..)) {
+        return Err(ParseError::Unsupported);
+    }
+    let mut nlris = NlriEnumIter::new(parser, (afisafi, addpath).into());
+    for nlri in &mut nlris {
+        nlri?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_mp_unreach<Octs: Octets>(
+    parser: &mut Parser<'_, Octs>,
+    ppi: PduParseInfo,
+) -> Result<(), ParseError> {
+    let afi = parser.parse_u16_be()?;
+    let safi = parser.parse_u8()?;
+    let afisafi = AfiSafiType::from((afi, safi));
+    validate_mp_nlri(*parser, afisafi, ppi.mp_unreach_addpath())
+}
 
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -1494,7 +1519,7 @@ impl Attribute for MpReachNextHop {
     fn validate<Octs: Octets>(
         _flags: Flags,
         parser: &mut Parser<'_, Octs>,
-        _ppi: PduParseInfo
+        ppi: PduParseInfo
     )
         -> Result<(), ParseError> {
         
@@ -1502,7 +1527,12 @@ impl Attribute for MpReachNextHop {
         let safi= parser.parse_u8()?;
         let afisafi = AfiSafiType::from((afi, safi));
         let _next_hop = crate::bgp::types::NextHop::parse(parser, afisafi)?;
-        Ok(())
+        if parser.parse_u8()? != 0 {
+            return Err(ParseError::form_error(
+                "MP_REACH_NLRI reserved byte is non-zero"
+            ));
+        }
+        validate_mp_nlri(*parser, afisafi, ppi.mp_reach_addpath())
     }
 
     fn parse<'a, Octs: 'a + Octets>(parser: &mut Parser<'a, Octs>, _ppi: PduParseInfo) 
@@ -1602,17 +1632,18 @@ impl<A: Clone + NlriCompose> Attribute for MpReachNlriBuilder<A> {
     fn validate<Octs: Octets>(
         _flags: Flags,
         parser: &mut Parser<'_, Octs>,
-        _ppi: PduParseInfo
+        ppi: PduParseInfo
     ) -> Result<(), ParseError> {
-        // We only check for the bare minimum here, as most checks are
-        // better done upon (creation of the) Nlri iterator based on the
-        // value of this path attribute.
-        if parser.remaining() < 5 {
+        let afi = parser.parse_u16_be()?;
+        let safi = parser.parse_u8()?;
+        let afisafi = AfiSafiType::from((afi, safi));
+        NextHop::parse(parser, afisafi)?;
+        if parser.parse_u8()? != 0 {
             return Err(ParseError::form_error(
-                "length for MP_REACH_NLRI less than minimum"
-            ))
+                "MP_REACH_NLRI reserved byte is non-zero"
+            ));
         }
-        Ok(())
+        validate_mp_nlri(*parser, afisafi, ppi.mp_reach_addpath())
         
          
         /*
@@ -1740,17 +1771,9 @@ impl<A: Clone + NlriCompose> Attribute for MpUnreachNlriBuilder<A> {
     fn validate<Octs: Octets>(
         _flags: Flags,
         parser: &mut Parser<'_, Octs>,
-        _pdu_parse_info: PduParseInfo
+        pdu_parse_info: PduParseInfo
     ) -> Result<(), ParseError> {
-        // We only check for the bare minimum here, as most checks are
-        // better done upon (creation of the) Nlri iterator based on the
-        // value of this path attribute.
-        if parser.remaining() < 3 {
-            return Err(ParseError::form_error(
-                "length for MP_UNREACH_NLRI less than minimum"
-            ))
-        }
-        Ok(())
+        validate_mp_unreach(parser, pdu_parse_info)
         /*
 
 
