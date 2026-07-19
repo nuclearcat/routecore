@@ -203,7 +203,8 @@ impl<C: BgpConfig + Send> Session<C> {
         }
     }
 
-    fn disconnect(&mut self, reason: DisconnectReason) {
+    async fn disconnect(&mut self, reason: DisconnectReason) {
+        let remote_addr = self.connected_addr();
         match reason {
             DisconnectReason::ConnectionRejected => {
                 self.send_notification(CeaseSubcode::ConnectionRejected);
@@ -241,6 +242,7 @@ impl<C: BgpConfig + Send> Session<C> {
         self.keepalive_timer.stop_and_reset();
         self.hold_timer.stop_and_reset();
         self.drop_connection();
+        let _ = self.channel.send(Message::ConnectionLost(remote_addr)).await;
     }
 
     /*
@@ -293,7 +295,7 @@ impl<C: BgpConfig + Send> Session<C> {
                         let _ = resp.send(config);
                     }
                     Command::Disconnect(reason) => {
-                        self.disconnect(reason);
+                        self.disconnect(reason).await;
                     }
                     Command::ForcedKeepalive => {
                         self.send_keepalive();
@@ -815,7 +817,7 @@ impl<C: BgpConfig + Send> Session<C> {
         //- and changes its state to OpenConfirm.
             }
             (S::Connect, E::BgpHeaderErr | E::BgpOpenMsgErr | E::NotifMsgVerErr) => {
-                self.disconnect(DisconnectReason::FsmViolation(None));
+                self.disconnect(DisconnectReason::FsmViolation(None)).await;
                 self.connect_retry_timer.stop_and_reset();
                 self.delay_open_timer.stop_and_reset();
                 self.increase_connect_retry_counter();
@@ -876,7 +878,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 if self.delay_open_timer.is_running() &&
                    self.attributes().notification_without_open()
                 {
-                    self.disconnect(DisconnectReason::Shutdown);
+                    self.disconnect(DisconnectReason::Shutdown).await;
                 }
 
                 //- releases all BGP resources including stopping the
@@ -1026,7 +1028,7 @@ impl<C: BgpConfig + Send> Session<C> {
                     );
                     self.disconnect(DisconnectReason::FsmViolation(Some(
                                 OpenMessageSubcode::BadPeerAs.into()
-                                )));
+                                ))).await;
                     self.set_state(State::Idle);
                     return Err(Error { msg: "stop processing" })
                 }
@@ -1095,7 +1097,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 //appropriate error code if the SendNOTIFICATIONwithoutOPEN
                 //attribute is set to TRUE,
                 if self.attributes().notification_without_open() {
-                    self.disconnect(DisconnectReason::FsmViolation(None));
+                    self.disconnect(DisconnectReason::FsmViolation(None)).await;
                 }
 
                 //- sets the ConnectRetryTimer to zero,
@@ -1206,7 +1208,7 @@ impl<C: BgpConfig + Send> Session<C> {
             (S::OpenSent, E::ManualStop) => {
                 //- sends the NOTIFICATION with a Cease,
                 // TODO tokio
-                self.disconnect(DisconnectReason::Shutdown);
+                self.disconnect(DisconnectReason::Shutdown).await;
 
                 //- sets the ConnectRetryTimer to zero,
                 self.connect_retry_timer.stop_and_reset();
@@ -1229,7 +1231,7 @@ impl<C: BgpConfig + Send> Session<C> {
             (S::OpenSent, E::HoldTimerExpires) => {
                 //- sends a NOTIFICATION message with the error code Hold
                 //Timer Expired,
-                self.disconnect(DisconnectReason::HoldTimerExpired);
+                self.disconnect(DisconnectReason::HoldTimerExpired).await;
 
                 //- sets the ConnectRetryTimer to zero,
                 self.connect_retry_timer.stop_and_reset();
@@ -1322,7 +1324,7 @@ impl<C: BgpConfig + Send> Session<C> {
                     );
                     self.disconnect(DisconnectReason::FsmViolation(Some(
                                 OpenMessageSubcode::BadPeerAs.into()
-                                )));
+                                ))).await;
                     self.set_state(State::Idle);
                     return Err(Error { msg: "stop processing" })
                 }
@@ -1437,7 +1439,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 self.disconnect(DisconnectReason::FsmViolation(Some(
                     FiniteStateMachineSubcode::
                         UnexpectedMessageInOpenSentState.into()
-                )));
+                ))).await;
 
                 //- sets the ConnectRetryTimer to zero,
                 self.connect_retry_timer.stop_and_reset();
@@ -1474,7 +1476,7 @@ impl<C: BgpConfig + Send> Session<C> {
             }
             (S::OpenConfirm, E::ManualStop) => {
                 //- sends the NOTIFICATION message with a Cease,
-                self.disconnect(DisconnectReason::Shutdown);
+                self.disconnect(DisconnectReason::Shutdown).await;
 
                 //- releases all BGP resources,
                 // TODO something?
@@ -1497,7 +1499,7 @@ impl<C: BgpConfig + Send> Session<C> {
             (S::OpenConfirm, E::HoldTimerExpires) => {
                 //- sends the NOTIFICATION message with the Error Code Hold
                 //Timer Expired,
-                self.disconnect(DisconnectReason::HoldTimerExpired);
+                self.disconnect(DisconnectReason::HoldTimerExpired).await;
 
                 //- sets the ConnectRetryTimer to zero,
                 self.connect_retry_timer.stop_and_reset();
@@ -1582,7 +1584,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 self.disconnect(DisconnectReason::FsmViolation(Some(
                     FiniteStateMachineSubcode::
                         UnexpectedMessageInOpenConfirmState.into()
-                )));
+                ))).await;
                        
                 //- sends a NOTIFICATION with a Cease,
                 //self.disconnect(DisconnectReason::Collision).await;
@@ -1652,7 +1654,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 self.disconnect(DisconnectReason::FsmViolation(Some(
                     FiniteStateMachineSubcode::
                         UnexpectedMessageInOpenConfirmState.into()
-                )));
+                ))).await;
 
                 //- sets the ConnectRetryTimer to zero,
                 self.connect_retry_timer.stop_and_reset();
@@ -1687,7 +1689,7 @@ impl<C: BgpConfig + Send> Session<C> {
             }
             (S::Established, E::ManualStop) => {
                 //- sends the NOTIFICATION message with a Cease,
-                self.disconnect(DisconnectReason::Shutdown);
+                self.disconnect(DisconnectReason::Shutdown).await;
 
                 //- sets the ConnectRetryTimer to zero,
                 self.connect_retry_timer.stop_and_reset();
@@ -1714,7 +1716,7 @@ impl<C: BgpConfig + Send> Session<C> {
 
                 //- sends a NOTIFICATION message with the Error Code Hold Timer
                 //  Expired,
-                self.disconnect(DisconnectReason::HoldTimerExpired);
+                self.disconnect(DisconnectReason::HoldTimerExpired).await;
 
                 //- sets the ConnectRetryTimer to zero,
                 self.connect_retry_timer.stop_and_reset();
@@ -1759,7 +1761,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 self.disconnect(DisconnectReason::FsmViolation(Some(
                     FiniteStateMachineSubcode::
                         UnexpectedMessageInEstablishedState.into()
-                )));
+                ))).await;
                 self.set_state(State::Idle);
             }
             // optional:
@@ -1850,7 +1852,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 self.disconnect(DisconnectReason::FsmViolation(Some(
                     FiniteStateMachineSubcode::
                         UnexpectedMessageInEstablishedState.into()
-                )));
+                ))).await;
 
                 //- deletes all routes associated with this connection,
                 // TODO store
