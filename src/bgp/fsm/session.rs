@@ -213,6 +213,11 @@ impl<C: BgpConfig + Send> Session<C> {
             DisconnectReason::ConnectionRejected => {
                 self.send_notification(CeaseSubcode::ConnectionRejected).await;
             }
+            DisconnectReason::ConnectionCollisionResolution => {
+                self.send_notification(
+                    CeaseSubcode::ConnectionCollisionResolution,
+                ).await;
+            }
             DisconnectReason::Reconfiguration => {
                 self.send_notification(
                     CeaseSubcode::OtherConfigurationChange,
@@ -1944,6 +1949,7 @@ pub enum Command {
 #[derive(Copy, Clone, Debug)]
 pub enum DisconnectReason {
     ConnectionRejected,
+    ConnectionCollisionResolution,
     Reconfiguration,
     Deconfigured,
     HoldTimerExpired,
