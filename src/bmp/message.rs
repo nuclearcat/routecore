@@ -288,11 +288,20 @@ impl<Octs: Octets> CommonHeader<Octs> {
     fn check<Ref: Octets>(parser: &mut Parser<Ref>)
         -> Result<(), ParseError>
     {
+        let message_len = parser.remaining();
         let version = parser.parse_u8()?;
         if version != 3 {
             return Err(ParseError::form_error("BMP version != 3"));
         }
-        parser.advance(4)?; // u32 message length
+        let declared_len = parser.parse_u32_be()? as usize;
+        if declared_len < 6 {
+            return Err(ParseError::form_error("BMP message length < 6"));
+        }
+        if declared_len != message_len {
+            return Err(ParseError::form_error(
+                "BMP message length does not match input"
+            ));
+        }
         let typ = parser.parse_u8()?;
         if typ > 6 {
             return Err(ParseError::form_error("BMP message type unknown"));
@@ -321,12 +330,19 @@ impl<Octs: Octets> CommonHeader<Octs> {
     fn parse<'a>(parser: &mut Parser<'a, Octs>)
         -> Result<CommonHeader<Octs::Range<'a>>, ParseError>
     {
-        // TODO check validity of version, length and msg type
-        Ok (
-            CommonHeader {
-                octets: parser.parse_octets(6)?
-            }
-        )
+        let header = CommonHeader {
+            octets: parser.parse_octets(6)?
+        };
+        if header.version() != 3 {
+            return Err(ParseError::form_error("BMP version != 3"));
+        }
+        if header.length() < 6 {
+            return Err(ParseError::form_error("BMP message length < 6"));
+        }
+        if matches!(header.msg_type(), MessageType::Unimplemented(_)) {
+            return Err(ParseError::form_error("BMP message type unknown"));
+        }
+        Ok(header)
     }
 }
 
@@ -1020,7 +1036,7 @@ impl<Octs: Octets> PeerUpNotification<Octs> {
         BgpOpen::parse(&mut parser)?; //TODO turn into check
 
         // optional Information
-        if parser.remaining() > 0 { 
+        while parser.remaining() > 0 {
             // Information TLVs of type 0 (String)
             let info_type = parser.parse_u16_be()?;
             match info_type {
@@ -1113,8 +1129,13 @@ impl<Octs: Octets> TerminationMessage<Octs> {
         CommonHeader::<Octs>::check(&mut parser)?;
 
         while parser.remaining() > 0 {
-            parser.advance(2)?; // type u16
+            let info_type = parser.parse_u16_be()?;
             let info_len = parser.parse_u16_be()?;
+            if info_type != 0 && info_len != 2 {
+                return Err(ParseError::form_error(
+                    "BMP termination reason must be two bytes"
+                ));
+            }
             parser.advance(info_len.into())?;
         }
 
@@ -1735,6 +1756,21 @@ mod tests {
         assert_eq!(ch.version(), 3);
         assert_eq!(ch.length(), 108);
         assert_eq!(ch.msg_type(), MessageType::InitiationMessage);
+    }
+
+    #[test]
+    fn message_rejects_mismatched_declared_length() {
+        let buf = [0x03, 0x00, 0x00, 0x00, 0x07, 0x04];
+        assert!(Message::from_octets(&buf[..]).is_err());
+    }
+
+    #[test]
+    fn termination_rejects_non_two_byte_reason() {
+        let buf = [
+            0x03, 0x00, 0x00, 0x00, 0x0b, 0x05,
+            0x00, 0x01, 0x00, 0x01, 0x00,
+        ];
+        assert!(Message::from_octets(&buf[..]).is_err());
     }
 
     #[test]
