@@ -1,5 +1,5 @@
 use core::ops::Range; 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -945,6 +945,11 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                         let afi = tmp_parser.parse_u16_be()?;
                         let safi = tmp_parser.parse_u8()?;
                         let afisafi = (afi, safi).into();
+                        if !session_config.mp_family_allowed(afisafi) {
+                            return Err(ParseError::form_error(
+                                "MP_REACH_NLRI family was not negotiated"
+                            ));
+                        }
                         mp_reach_afisafi = Some(afisafi);
                     }
                     15 => {
@@ -953,6 +958,11 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                         let afi = tmp_parser.parse_u16_be()?;
                         let safi = tmp_parser.parse_u8()?;
                         let afisafi = (afi, safi).into();
+                        if !session_config.mp_family_allowed(afisafi) {
+                            return Err(ParseError::form_error(
+                                "MP_UNREACH_NLRI family was not negotiated"
+                            ));
+                        }
                         mp_unreach_afisafi = Some(afisafi);
                     }
                     _ => {
@@ -1056,8 +1066,7 @@ pub struct SessionConfig {
     ipv4unicast_in_mp: Ipv4UnicastInMp,
     addpath_fams: SessionAddpaths,
     extended_messages: bool,
-    // TODO keep track of enabled MP AFISAFIs?
-    // see intersection in From<NegotiatedConfig> for SessionConfig in session.rs
+    mp_fams: Option<HashSet<AfiSafiType>>,
 }
 
 /// Configuration parameters (state) to parse an individual UPDATE message.
@@ -1223,6 +1232,7 @@ impl SessionConfig {
             ipv4unicast_in_mp: Ipv4UnicastInMp(false),
             addpath_fams: SessionAddpaths::new(),
             extended_messages: false,
+            mp_fams: None,
         }
     }
 
@@ -1233,6 +1243,7 @@ impl SessionConfig {
             ipv4unicast_in_mp: Ipv4UnicastInMp(false),
             addpath_fams: SessionAddpaths::new(),
             extended_messages: false,
+            mp_fams: None,
         }
     }
 
@@ -1253,6 +1264,29 @@ impl SessionConfig {
         } else {
             4096
         }
+    }
+
+    /// Restricts multiprotocol UPDATEs to an explicitly negotiated set.
+    pub fn restrict_mp_families<I>(&mut self, families: I)
+    where
+        I: IntoIterator<Item = AfiSafiType>,
+    {
+        self.mp_fams = Some(families.into_iter().collect());
+    }
+
+    /// Returns whether a multiprotocol family is valid in this context.
+    /// Standalone modern/legacy configs remain permissive for file parsing.
+    pub fn mp_family_allowed(&self, family: AfiSafiType) -> bool {
+        self.mp_fams
+            .as_ref()
+            .is_none_or(|families| families.contains(&family))
+    }
+
+    /// Returns the strict negotiated family set, if one is configured.
+    pub fn mp_families(&self) -> Option<impl Iterator<Item = AfiSafiType> + '_> {
+        self.mp_fams
+            .as_ref()
+            .map(|families| families.iter().copied())
     }
 
     /// Returns true if IPv4 Unicast is carried as MultiProtocol attribute.
@@ -2701,6 +2735,23 @@ mod tests {
         assert!(
             UpdateMessage::from_octets(&raw, &SessionConfig::modern()).is_err()
         );
+    }
+
+    #[test]
+    fn rejects_unnegotiated_mp_family() {
+        let mut raw = vec![0xff; 16];
+        raw.extend_from_slice(&29u16.to_be_bytes());
+        raw.push(2);
+        raw.extend_from_slice(&0u16.to_be_bytes());
+        raw.extend_from_slice(&6u16.to_be_bytes());
+        raw.extend_from_slice(&[0x80, 15, 3, 0, 1, 1]);
+
+        let mut config = SessionConfig::modern();
+        config.restrict_mp_families([AfiSafiType::Ipv6Unicast]);
+        assert!(UpdateMessage::from_octets(&raw, &config).is_err());
+
+        config.restrict_mp_families([AfiSafiType::Ipv4Unicast]);
+        assert!(UpdateMessage::from_octets(&raw, &config).is_ok());
     }
 
     #[ignore = "this could/should now happen on PduParseInfo level?"]

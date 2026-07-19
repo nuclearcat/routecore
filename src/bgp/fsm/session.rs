@@ -2304,6 +2304,7 @@ impl From<&NegotiatedConfig> for SessionConfig {
         let local_mp_fams = local_caps.multiprotocol_ids().collect::<std::collections::HashSet<_>>();
         let remote_mp_fams = remote_caps.multiprotocol_ids().collect::<std::collections::HashSet<_>>();
         let mp_fams_intersect = local_mp_fams.intersection(&remote_mp_fams).cloned().collect::<Vec<AfiSafiType>>();
+        session_config.restrict_mp_families(mp_fams_intersect.iter().copied());
         if mp_fams_intersect.contains(&AfiSafiType::Ipv4Unicast) {
             session_config.set_ipv4unicast_in_mp();
         }
