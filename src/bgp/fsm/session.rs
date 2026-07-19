@@ -48,6 +48,10 @@ fn negotiated_timer_intervals(hold_time: u16) -> Option<(u64, u64)> {
     }
 }
 
+const fn acceptable_hold_time(hold_time: u16) -> bool {
+    hold_time == 0 || hold_time >= 3
+}
+
 //------------ Session -------------------------------------------------------
 /// BGP Session holding the FSM and (local/negotiated) configuration.
 ///
@@ -402,7 +406,10 @@ impl<C: BgpConfig + Send> Session<C> {
         }
     }
 
-    pub async fn send_open(&mut self) {
+    pub async fn send_open(&mut self) -> Result<(), Error> {
+        if !acceptable_hold_time(self.attributes.hold_time()) {
+            return Err(Error::for_str("configured hold time must be zero or at least three seconds"));
+        }
         let mut openbuilder =
             OpenBuilder::from_target(BytesMut::new()).unwrap();
         openbuilder.set_asn(self.config.local_asn());
@@ -435,6 +442,7 @@ impl<C: BgpConfig + Send> Session<C> {
         let open_msg = openbuilder.into_message();
         self.set_local_capabilities(open_msg.capabilities_as_vec());
         self.send_pdu(BgpMsg::Open(open_msg)).await;
+        Ok(())
     }
 
     fn set_local_capabilities(&mut self, capabilities: Vec<u8>) {
@@ -703,7 +711,7 @@ impl<C: BgpConfig + Send> Session<C> {
             // optional events:
             (S::Connect, E::DelayOpenTimerExpires) => {
                     //- sends an OPEN message to its peer,
-                    self.send_open().await;
+                    self.send_open().await?;
 
                     //- sets the HoldTimer to a large value, and
                     // TODO
@@ -740,7 +748,7 @@ impl<C: BgpConfig + Send> Session<C> {
                     //  TODO (do we need to do something here?)
 
                     //  - sends an OPEN message to its peer,
-                    self.send_open().await;
+                    self.send_open().await?;
 
 
                     //  - set the HoldTimer to a large value (suggested: 4min)
@@ -942,7 +950,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 // TODO anything?
 
                 //- sends the OPEN message to its remote peer,
-                self.send_open().await;
+                self.send_open().await?;
 
                 //- sets its hold timer to a large value, and
                 // TODO
@@ -977,7 +985,7 @@ impl<C: BgpConfig + Send> Session<C> {
 
                     //  - sends the OPEN message to its peer,
                     debug!("send_open in Active, no DelayOpen");
-                    self.send_open().await;
+                    self.send_open().await?;
 
                     //  - sets its HoldTimer to a large value (sugg: 4min), 
                     //  TODO
@@ -1021,6 +1029,14 @@ impl<C: BgpConfig + Send> Session<C> {
                 // do we need to do something here?
 
                 //- sends an OPEN message,
+                if !acceptable_hold_time(open_msg.holdtime()) {
+                    self.disconnect(DisconnectReason::FsmViolation(Some(
+                        OpenMessageSubcode::UnacceptableHoldTime.into(),
+                    ))).await;
+                    self.set_state(State::Idle);
+                    return Err(Error::for_str("peer advertised an unacceptable hold time"));
+                }
+
                 if !self.config.remote_asn_allowed(open_msg.my_asn()) {
                     warn!(
                         "unexpected ASN {} in OPEN",
@@ -1042,7 +1058,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 debug!("addpath intersection: {:?}", &intersection);
 
 
-                self.send_open().await;
+                self.send_open().await?;
                 let negotiated = NegotiatedConfig {
                     hold_time: std::cmp::min(open_msg.holdtime(), self.hold_time()),
                     // TODO rename .identifier() and its return type in
@@ -1316,6 +1332,14 @@ impl<C: BgpConfig + Send> Session<C> {
         //  DampPeerOscillations attribute is set to TRUE, and
 
         //- changes its state to Idle.
+
+                if !acceptable_hold_time(open_msg.holdtime()) {
+                    self.disconnect(DisconnectReason::FsmViolation(Some(
+                        OpenMessageSubcode::UnacceptableHoldTime.into(),
+                    ))).await;
+                    self.set_state(State::Idle);
+                    return Err(Error::for_str("peer advertised an unacceptable hold time"));
+                }
 
                 if !self.config.remote_asn_allowed(open_msg.my_asn()) {
                     warn!(
@@ -2450,6 +2474,15 @@ mod negotiated_addpaths_tests {
         assert_eq!(negotiated_timer_intervals(0), None);
         assert_eq!(negotiated_timer_intervals(3), Some((3, 1)));
         assert_eq!(negotiated_timer_intervals(90), Some((90, 30)));
+    }
+
+    #[test]
+    fn hold_time_acceptability_matches_rfc_4271() {
+        assert!(acceptable_hold_time(0));
+        assert!(!acceptable_hold_time(1));
+        assert!(!acceptable_hold_time(2));
+        assert!(acceptable_hold_time(3));
+        assert!(acceptable_hold_time(u16::MAX));
     }
 
     fn header(message_type: u8, length: u16) -> BytesMut {
