@@ -1695,6 +1695,10 @@ impl<'a, P> NlriEnumIter<'a, P> {
     pub const fn afi_safi(&self) -> AfiSafiType {
         self.ty.afi_safi()
     }
+
+    pub const fn into_parser(self) -> Parser<'a, P> {
+        self.parser
+    }
 }
 
 impl<'a, O, P> Iterator for NlriEnumIter<'a, P>

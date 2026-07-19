@@ -3,6 +3,7 @@ use octseq::{Octets, OctetsFrom, Parser};
 use crate::bgp::fsm::state_machine::State;
 use crate::bgp::message::SessionConfig;
 use crate::bgp::nlri::common::{parse_v4_prefix, parse_v6_prefix};
+use crate::bgp::nlri::afisafi::{IsPrefix, Nlri, NlriEnumIter};
 use crate::bgp::types::AfiSafiType;
 use crate::bgp::{message::Message as BgpMsg, ParseError};
 use crate::util::parser::{parse_ipv4addr, parse_ipv6addr};
@@ -642,6 +643,24 @@ mod peer_index_tests {
             .rib_entries().unwrap().next().unwrap().unwrap();
         assert_eq!(entry.4, Some(42));
     }
+
+    #[test]
+    fn multicast_rib_entry_is_not_skipped() {
+        let peer = [0, 0, 0, 0, 1, 192, 0, 2, 1, 0, 100];
+        let mut raw = peer_index_record(1, &peer);
+        let mut rib = Vec::new();
+        rib.extend_from_slice(&1u32.to_be_bytes());
+        rib.extend_from_slice(&[8, 224]);
+        rib.extend_from_slice(&1u16.to_be_bytes());
+        rib.extend_from_slice(&0u16.to_be_bytes());
+        rib.extend_from_slice(&0u32.to_be_bytes());
+        rib.extend_from_slice(&0u16.to_be_bytes());
+        raw.extend_from_slice(&record(3, &rib));
+
+        let entry = MrtFile::new(&raw)
+            .rib_entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.0, crate::bgp::types::AfiSafiType::Ipv4Multicast);
+    }
 }
 
 //------------ RecordIterator ------------------------------------------------
@@ -1191,6 +1210,8 @@ pub enum RibEntryNlri {
     /// RIB_GENERIC with a FlowSpec AFI/SAFI: the raw FlowSpec NLRI bytes
     /// (without the length header), i.e. `FlowSpecNlri::raw()`.
     FlowSpec(Vec<u8>),
+    /// Wire-format NLRI for another routecore-supported generic family.
+    Raw(Vec<u8>),
 }
 
 impl fmt::Display for RibEntryNlri {
@@ -1202,6 +1223,11 @@ impl fmt::Display for RibEntryNlri {
                 for b in raw {
                     write!(f, "{:02x}", b)?;
                 }
+                write!(f, ")")
+            }
+            RibEntryNlri::Raw(raw) => {
+                write!(f, "nlri(")?;
+                for b in raw { write!(f, "{:02x}", b)?; }
                 write!(f, ")")
             }
         }
@@ -1240,7 +1266,29 @@ fn parse_rib_generic_header<'a, Octs: Octets>(
                 entries,
             )))
         }
-        _ => Ok(None),
+        _ => {
+            let afisafi = AfiSafiType::from((afi, safi));
+            if matches!(afisafi, AfiSafiType::Unsupported(..)) {
+                return Ok(None);
+            }
+            let start = parser.pos();
+            let mut iter = NlriEnumIter::new(*parser, (afisafi, false).into());
+            let nlri = iter.next().transpose()?.ok_or_else(||
+                ParseError::form_error("RIB_GENERIC record has no NLRI")
+            )?;
+            let consumed = iter.into_parser().pos() - start;
+            let raw = parser.parse_octets(consumed)?.as_ref().to_vec();
+            let nlri = match nlri {
+                Nlri::Ipv4Unicast(n) => RibEntryNlri::Prefix(n.prefix()),
+                Nlri::Ipv4Multicast(n) => RibEntryNlri::Prefix(n.prefix()),
+                Nlri::Ipv6Unicast(n) => RibEntryNlri::Prefix(n.prefix()),
+                Nlri::Ipv6Multicast(n) => RibEntryNlri::Prefix(n.prefix()),
+                _ => RibEntryNlri::Raw(raw),
+            };
+            let _entry_count = parser.parse_u16_be()?;
+            let entries = parser.parse_parser(parser.remaining())?;
+            Ok(Some((afisafi, nlri, path_id, entries)))
+        }
     }
 }
 
@@ -1332,6 +1380,26 @@ where
                             entries,
                         ));
                         self.current_afisafi = Some(AfiSafiType::Ipv6Unicast);
+                        self.current_addpath = false;
+                        self.current_nlri_path_id = None;
+                    }
+                    TableDumpv2SubType::RibIpv4Multicast => {
+                        let reh = match RibEntryHeader::parse(&mut m.message, Afi::Ipv4) {
+                            Ok(header) => header,
+                            Err(err) => { self.fused = true; return Some(Err(err)); }
+                        };
+                        self.current_table = Some((RibEntryNlri::Prefix(reh.prefix()), reh.entries));
+                        self.current_afisafi = Some(AfiSafiType::Ipv4Multicast);
+                        self.current_addpath = false;
+                        self.current_nlri_path_id = None;
+                    }
+                    TableDumpv2SubType::RibIpv6Multicast => {
+                        let reh = match RibEntryHeader::parse(&mut m.message, Afi::Ipv6) {
+                            Ok(header) => header,
+                            Err(err) => { self.fused = true; return Some(Err(err)); }
+                        };
+                        self.current_table = Some((RibEntryNlri::Prefix(reh.prefix()), reh.entries));
+                        self.current_afisafi = Some(AfiSafiType::Ipv6Multicast);
                         self.current_addpath = false;
                         self.current_nlri_path_id = None;
                     }
