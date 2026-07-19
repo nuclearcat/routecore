@@ -143,24 +143,36 @@ impl<Octs: Octets> Message<Octs> {
 /// marker to read the length, and reads bytes accordingly.
 /// The returned slice can be used with `Message::from_octets` to actually get
 /// a BGP message.
-pub fn read_message<'a, T: Read>(bytes: &mut T, buf: &'a mut [u8; 4096])
+pub fn read_message<'a, T: Read>(bytes: &mut T, buf: &'a mut [u8])
     -> Result<Option<&'a [u8]>, &'a str>
 {
+    if buf.len() < 18 {
+        return Err("BGP message buffer is smaller than the length prefix")
+    }
 
-    if let Err(e) = bytes.read_exact(&mut buf[..18]) {
-        match e.kind() {
-            std::io::ErrorKind::UnexpectedEof => { return Ok(None) }
-            _ => return Err("io error")
+    let mut read = 0;
+    while read < 18 {
+        match bytes.read(&mut buf[read..18]) {
+            Ok(0) if read == 0 => return Ok(None),
+            Ok(0) => return Err("truncated BGP message header"),
+            Ok(n) => read += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err("io error"),
         }
     }
 
     let len = u16::from_be_bytes([buf[16], buf[17]]) as usize;
-    if len > 4096 {
-        println!("jumbo? (len: {len}) {:x?}", &buf[..20]);
+    if len < 19 {
+        return Err("BGP message length is smaller than 19")
+    }
+    if len > buf.len() {
+        return Err("BGP message buffer is too small")
     }
 
     // including marker+length+type
-    let _ = bytes.read_exact(&mut buf[18..(len)]);
+    if bytes.read_exact(&mut buf[18..len]).is_err() {
+        return Err("truncated BGP message body")
+    }
     Ok(Some(&buf[..len]))
 }
 
@@ -350,5 +362,73 @@ impl Error for MessageError { }
 impl From<PrefixError> for ParseError {
     fn from(_e: PrefixError) -> ParseError {
         ParseError::form_error("failed to parse prefix")
+    }
+}
+
+#[cfg(test)]
+mod read_message_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn message(len: usize) -> Vec<u8> {
+        let mut bytes = vec![0xff; len];
+        bytes[16..18].copy_from_slice(&(len as u16).to_be_bytes());
+        bytes[18] = 2;
+        bytes
+    }
+
+    #[test]
+    fn reads_legacy_and_extended_messages() {
+        for len in [19, 4097, u16::MAX as usize] {
+            let bytes = message(len);
+            let mut input = Cursor::new(bytes);
+            let mut buffer = vec![0; len];
+
+            assert_eq!(
+                read_message(&mut input, &mut buffer).unwrap().unwrap().len(),
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_length_and_small_buffer() {
+        let mut invalid = message(19);
+        invalid[16..18].copy_from_slice(&18_u16.to_be_bytes());
+        let mut input = Cursor::new(invalid);
+        let mut buffer = vec![0; 19];
+        assert_eq!(
+            read_message(&mut input, &mut buffer).unwrap_err(),
+            "BGP message length is smaller than 19"
+        );
+
+        let mut input = Cursor::new(message(4097));
+        let mut buffer = vec![0; 4096];
+        assert_eq!(
+            read_message(&mut input, &mut buffer).unwrap_err(),
+            "BGP message buffer is too small"
+        );
+    }
+
+    #[test]
+    fn distinguishes_clean_eof_from_truncation() {
+        let mut empty = Cursor::new(Vec::<u8>::new());
+        let mut buffer = vec![0; 19];
+        assert!(read_message(&mut empty, &mut buffer).unwrap().is_none());
+
+        let mut short_header = Cursor::new(vec![0xff; 10]);
+        assert_eq!(
+            read_message(&mut short_header, &mut buffer).unwrap_err(),
+            "truncated BGP message header"
+        );
+
+        let mut short_body = message(20);
+        short_body.pop();
+        let mut short_body = Cursor::new(short_body);
+        let mut body_buffer = vec![0; 20];
+        assert_eq!(
+            read_message(&mut short_body, &mut body_buffer).unwrap_err(),
+            "truncated BGP message body"
+        );
     }
 }
