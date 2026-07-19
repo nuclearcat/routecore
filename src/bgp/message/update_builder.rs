@@ -25,10 +25,6 @@ pub struct UpdateBuilder<Target, A> {
     attributes: PaMap,
 }
 
-impl<T, A> UpdateBuilder<T, A> {
-    const MAX_PDU: usize = 4096; // XXX should come from NegotiatedConfig
-}
-
 impl<Target, A> UpdateBuilder<Target, A>
 where
     A: AfiSafiNlri + NlriCompose,
@@ -286,6 +282,10 @@ where
         <Target as FreezeBuilder>::Octets: Octets
     {
         self.is_valid()?;
+        let pdu_len = self.calculate_pdu_length(session_config);
+        if pdu_len > session_config.max_message_len() {
+            return Err(ComposeError::PduTooLarge(pdu_len))
+        }
         Ok(UpdateMessage::from_octets(
             self.finish(session_config).map_err(|_| ShortBuf)?, session_config,
         )?)
@@ -356,14 +356,6 @@ where
     }
 
     fn larger_than(&self, max: usize, session_config: &SessionConfig) -> bool {
-        // TODO add more 'quick returns' here, e.g. for MpUnreachNlri or
-        // conventional withdrawals/announcements.
-
-        if let Some(b) = &self.announcements
-            && b.announcements.len() * 2 > max
-        {
-            return true;
-        }
         self.calculate_pdu_length(session_config) > max
     }
 
@@ -379,7 +371,8 @@ where
         Target: Clone + OctetsBuilder + FreezeBuilder + AsMut<[u8]> + octseq::Truncate,
         <Target as FreezeBuilder>::Octets: Octets
     {
-        if !self.larger_than(Self::MAX_PDU, session_config) {
+        let max_pdu = session_config.max_message_len();
+        if !self.larger_than(max_pdu, session_config) {
             return (self.into_message(session_config), None)
 
         }
@@ -434,14 +427,24 @@ where
         {
             let mut split_at = 0;
             if !unreach_builder.withdrawals.is_empty() {
+                let nlri_budget = max_pdu.saturating_sub(
+                    // marker/len/type, withdrawn len, path attributes len,
+                    // MP_UNREACH_NLRI header, AFI/SAFI
+                    16 + 2 + 1 + 2 + 2 + 4 + 3
+                );
                 let mut compose_len = 0;
                 for (idx, w) in unreach_builder.withdrawals.iter().enumerate()
                 {
-                    compose_len += w.compose_len();
-                    if compose_len > 4000 {
-                        split_at = idx;
+                    let next_len = w.compose_len();
+                    if compose_len + next_len > nlri_budget {
                         break;
                     }
+                    compose_len += next_len;
+                    split_at = idx + 1;
+                }
+                if split_at == 0 {
+                    let pdu_len = self.calculate_pdu_length(session_config);
+                    return (Err(ComposeError::PduTooLarge(pdu_len)), None)
                 }
 
                 let this_batch = unreach_builder.split(split_at);
@@ -499,21 +502,27 @@ where
             let mut split_at = 0;
 
             let other_attrs_len = self.attributes.bytes_len();
-            let limit = Self::MAX_PDU 
-                    // marker/len/type, wdraw len, total pa len
-                    - (16 + 2 + 1 + 2 + 2)
-                    // MP_REACH_NLRI flags/type/len/afi/safi/rsrved, next_hop
-                    - 8 - reach_builder.get_nexthop().compose_len()
-                    - other_attrs_len;
+            let fixed_len =
+                // marker/len/type, wdraw len, total pa len
+                (16 + 2 + 1 + 2 + 2)
+                // MP_REACH_NLRI flags/type/len/afi/safi/rsrved, next_hop
+                + 8 + reach_builder.get_nexthop().compose_len()
+                + other_attrs_len;
+            let limit = max_pdu.saturating_sub(fixed_len);
 
                 if !reach_builder.announcements.is_empty() {
                     let mut compose_len = 0;
                     for (idx, a) in reach_builder.announcements.iter().enumerate() {
-                        compose_len += a.compose_len();
-                        if compose_len > limit {
-                            split_at = idx;
+                        let next_len = a.compose_len();
+                        if compose_len + next_len > limit {
                             break;
                         }
+                        compose_len += next_len;
+                        split_at = idx + 1;
+                    }
+                    if split_at == 0 {
+                        let pdu_len = self.calculate_pdu_length(session_config);
+                        return (Err(ComposeError::PduTooLarge(pdu_len)), None)
                     }
 
                     let this_batch = reach_builder.split(split_at);
@@ -1662,7 +1671,7 @@ mod tests {
         for pdu in builder.into_pdu_iter(&SessionConfig::modern()) {
             //eprint!(".");
             let pdu = pdu.unwrap();
-            assert!(pdu.as_ref().len() <= UpdateBuilder::<(), Ipv4UnicastNlri>::MAX_PDU);
+            assert!(pdu.as_ref().len() <= SessionConfig::modern().max_message_len());
             a_cnt += pdu.announcements().unwrap().count();
             assert!(pdu.local_pref().unwrap().is_some());
             assert!(pdu.multi_exit_disc().unwrap().is_some());
@@ -1670,6 +1679,75 @@ mod tests {
         }
 
         assert_eq!(a_cnt, usize::try_from(prefixes_num).unwrap());
+    }
+
+    #[test]
+    fn extended_session_builds_update_above_legacy_limit() {
+        let mut builder = UpdateBuilder::new_vec();
+        for i in 1..1500_u32 {
+            builder.add_withdrawal(
+                Ipv4UnicastNlri::try_from(
+                    Prefix::new_v4(
+                        Ipv4Addr::from((i << 10).to_be_bytes()),
+                        22,
+                    ).unwrap()
+                ).unwrap()
+            ).unwrap();
+        }
+        let mut config = SessionConfig::modern();
+        config.enable_extended_messages();
+
+        let messages = builder.into_messages(&config).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].as_ref().len() > 4096);
+        assert!(messages[0].as_ref().len() <= config.max_message_len());
+        assert_eq!(messages[0].withdrawals().unwrap().count(), 1499);
+    }
+
+    #[test]
+    fn extended_session_splits_at_wire_limit_without_losing_nlri() {
+        let mut builder = UpdateBuilder::new_vec();
+        let prefixes_num = 20_000_u32;
+        for i in 1..=prefixes_num {
+            builder.add_withdrawal(
+                Ipv4UnicastNlri::try_from(
+                    Prefix::new_v4(Ipv4Addr::from(i.to_be_bytes()), 32)
+                        .unwrap()
+                ).unwrap()
+            ).unwrap();
+        }
+        let mut config = SessionConfig::modern();
+        config.enable_extended_messages();
+
+        let messages = builder.into_messages(&config).unwrap();
+
+        assert!(messages.len() > 1);
+        assert!(messages
+            .iter()
+            .all(|message| message.as_ref().len() <= config.max_message_len()));
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.withdrawals().unwrap().count())
+                .sum::<usize>(),
+            prefixes_num as usize
+        );
+    }
+
+    #[test]
+    fn direct_oversized_message_returns_error_instead_of_panicking() {
+        let mut builder = UpdateBuilder::<Vec<u8>, Ipv4UnicastNlri>::new_vec();
+        for n in 0..17_000_u32 {
+            builder.add_community(StandardCommunity::from(n)).unwrap();
+        }
+        let mut config = SessionConfig::modern();
+        config.enable_extended_messages();
+
+        assert!(matches!(
+            builder.into_message(&config),
+            Err(ComposeError::PduTooLarge(_))
+        ));
     }
 
 

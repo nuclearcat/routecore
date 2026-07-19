@@ -1238,6 +1238,15 @@ impl SessionConfig {
         self.extended_messages = true;
     }
 
+    /// Returns the maximum BGP message length negotiated for this session.
+    pub fn max_message_len(&self) -> usize {
+        if self.extended_messages {
+            u16::MAX as usize
+        } else {
+            4096
+        }
+    }
+
     /// Returns true if IPv4 Unicast is carried as MultiProtocol attribute.
     pub fn ipv4_unicast_in_mp(&self) -> bool {
         self.ipv4unicast_in_mp.0
