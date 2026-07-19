@@ -509,16 +509,18 @@ impl<'a> MrtFile<'a> {
             MessageSubType::TableDumpv2SubType(tdv2) => {
                 match tdv2 {
                     TableDumpv2SubType::PeerIndexTable => {
-                        assert!(peer_index.is_empty());
                         let mut pit = PeerIndexTable::parse(&mut m.message)?;
-                        peer_index.reserve(pit.peer_count().into());
+                        let peer_count = pit.peer_count();
+                        peer_index.reserve(peer_count.into());
                         let mut pes = pit.entries();
-                        while pes.remaining() > 0 {
-                            let pe = PeerEntry::parse(&mut pes).unwrap();
-                            //println!("peer entry {pe:?}");
-                            peer_index.push(pe);
+                        for _ in 0..peer_count {
+                            peer_index.push(PeerEntry::parse(&mut pes)?);
                         }
-                        assert_eq!(peer_index.len(), usize::from(pit.peer_count()));
+                        if pes.remaining() != 0 {
+                            return Err(ParseError::form_error(
+                                "peer index table contains trailing data"
+                            ));
+                        }
                         Ok(peer_index)
                     },
                     _ => {
@@ -547,6 +549,37 @@ impl<'a> MrtFile<'a> {
             parser: Parser::from_ref(&self.raw),
             fused: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_index_tests {
+    use super::MrtFile;
+
+    fn peer_index_record(peer_count: u16, entries: &[u8]) -> Vec<u8> {
+        let body_len = 8 + entries.len();
+        let mut record = Vec::with_capacity(12 + body_len);
+        record.extend_from_slice(&0u32.to_be_bytes());
+        record.extend_from_slice(&13u16.to_be_bytes());
+        record.extend_from_slice(&1u16.to_be_bytes());
+        record.extend_from_slice(&(body_len as u32).to_be_bytes());
+        record.extend_from_slice(&0u32.to_be_bytes());
+        record.extend_from_slice(&0u16.to_be_bytes());
+        record.extend_from_slice(&peer_count.to_be_bytes());
+        record.extend_from_slice(entries);
+        record
+    }
+
+    #[test]
+    fn truncated_peer_entry_is_an_error() {
+        let raw = peer_index_record(1, &[0]);
+        assert!(MrtFile::new(&raw).pi().is_err());
+    }
+
+    #[test]
+    fn trailing_peer_entry_data_is_an_error() {
+        let raw = peer_index_record(0, &[0]);
+        assert!(MrtFile::new(&raw).pi().is_err());
     }
 }
 
