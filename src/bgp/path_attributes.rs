@@ -584,10 +584,15 @@ macro_rules! path_attributes {
                 let res = match type_code {
                     $(
                     $type_code => {
-                        if let Err(e) = <$data>::validate(
-                            flags.into(), &mut pp, ppi
-                        ) {
-                            debug!("failed to parse path attribute: {e}");
+                        let actual_flags = Flags::from(flags);
+                        let expected_flags = Flags::from($flags);
+                        let flags_valid =
+                            actual_flags.is_optional() == expected_flags.is_optional()
+                            && actual_flags.is_transitive() == expected_flags.is_transitive();
+                        if !flags_valid || <$data>::validate(
+                            actual_flags, &mut pp, ppi
+                        ).is_err() {
+                            debug!("failed to validate path attribute {}", $type_code);
                             if $type_code == 14 {
                                 return Err(ParseError::form_error(
                                         "invalid MP_REACH_NLRI"

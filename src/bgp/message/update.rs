@@ -40,6 +40,25 @@ pub struct UpdateMessage<Octs: Octets> {
     attributes: Range<usize>,
     announcements: Range<usize>,
     pdu_parse_info: PduParseInfo,
+    treatment: UpdateTreatment,
+}
+
+/// RFC 7606 processing required for a syntactically framed UPDATE.
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub enum UpdateTreatment {
+    #[default]
+    Normal,
+    AttributeDiscard,
+    TreatAsWithdraw,
+}
+
+impl UpdateTreatment {
+    fn strengthen(&mut self, other: Self) {
+        if (other as u8) > (*self as u8) {
+            *self = other;
+        }
+    }
 }
 
 
@@ -51,6 +70,10 @@ impl<Octs: Octets> UpdateMessage<Octs> {
 
     pub fn pdu_parse_info(&self) -> PduParseInfo {
         self.pdu_parse_info
+    }
+
+    pub fn treatment(&self) -> UpdateTreatment {
+        self.treatment
     }
 
     ///// Returns the [`Header`] for this message.
@@ -872,6 +895,7 @@ impl<Octs: Octets> UpdateMessage<Octs> {
             attributes,
             announcements,
             pdu_parse_info,
+            treatment,
             ..
         } = UpdateMessage::<_>::parse(&mut parser, config)?;
         let res  = 
@@ -880,7 +904,8 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                 withdrawals: (withdrawals.start +19..withdrawals.end + 19),
                 attributes: (attributes.start +19..attributes.end + 19),
                 announcements: (announcements.start +19..announcements.end + 19),
-                pdu_parse_info
+                pdu_parse_info,
+                treatment,
             }
         ;
 
@@ -929,6 +954,10 @@ impl<Octs: Octets> UpdateMessage<Octs> {
         // To create PduParseInfo later on:
         let mut mp_reach_afisafi = None;
         let mut mp_unreach_afisafi = None;
+        let mut treatment = UpdateTreatment::Normal;
+        let mut seen_attributes = std::collections::HashSet::new();
+        let mut valid_attributes = std::collections::HashSet::new();
+        let mut has_mp_announcements = false;
 
         let attributes_len = parser.parse_u16_be()?;
         let attributes_start = parser.pos() - start_pos;
@@ -951,6 +980,9 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                             ));
                         }
                         mp_reach_afisafi = Some(afisafi);
+                        NextHop::skip(&mut tmp_parser)?;
+                        tmp_parser.advance(1)?;
+                        has_mp_announcements = tmp_parser.remaining() > 0;
                     }
                     15 => {
                         // MP_UNREACH_NLRI
@@ -978,7 +1010,26 @@ impl<Octs: Octets> UpdateMessage<Octs> {
                 mp_unreach_afisafi,
             );
             for pa in PathAttributes::new(pas_parser, ppi) {
-                pa?;
+                let pa = pa?;
+                let type_code = pa.type_code();
+                if !seen_attributes.insert(type_code) {
+                    if matches!(type_code, 14 | 15) {
+                        return Err(ParseError::form_error(
+                            "duplicate MP_REACH_NLRI or MP_UNREACH_NLRI"
+                        ));
+                    }
+                    treatment.strengthen(UpdateTreatment::AttributeDiscard);
+                    continue;
+                }
+                if matches!(pa, WireformatPathAttribute::Invalid(..)) {
+                    treatment.strengthen(if matches!(type_code, 6 | 7) {
+                        UpdateTreatment::AttributeDiscard
+                    } else {
+                        UpdateTreatment::TreatAsWithdraw
+                    });
+                } else {
+                    valid_attributes.insert(type_code);
+                }
             }
             for pa in UncheckedPathAttributes::from_parser(pas_parser) {
                 if pa.type_code() == 15 {
@@ -1016,6 +1067,15 @@ impl<Octs: Octets> UpdateMessage<Octs> {
 
         let announcements = announcements_start..end_pos;
 
+        if !announcements.is_empty() || has_mp_announcements {
+            if !valid_attributes.contains(&1) || !valid_attributes.contains(&2) {
+                treatment.strengthen(UpdateTreatment::TreatAsWithdraw);
+            }
+            if !announcements.is_empty() && !valid_attributes.contains(&3) {
+                treatment.strengthen(UpdateTreatment::TreatAsWithdraw);
+            }
+        }
+
 
         if end_pos != (header.length() as usize) - 19 {
             return Err(ParseError::form_error(
@@ -1036,7 +1096,8 @@ impl<Octs: Octets> UpdateMessage<Octs> {
             withdrawals,
             attributes,
             announcements,
-            pdu_parse_info: ppi
+            pdu_parse_info: ppi,
+            treatment,
         })
     }
 
@@ -2752,6 +2813,34 @@ mod tests {
 
         config.restrict_mp_families([AfiSafiType::Ipv4Unicast]);
         assert!(UpdateMessage::from_octets(&raw, &config).is_ok());
+    }
+
+    #[test]
+    fn missing_mandatory_attributes_are_treat_as_withdraw() {
+        let mut raw = vec![0xff; 16];
+        raw.extend_from_slice(&27u16.to_be_bytes());
+        raw.push(2);
+        raw.extend_from_slice(&0u16.to_be_bytes());
+        raw.extend_from_slice(&0u16.to_be_bytes());
+        raw.extend_from_slice(&[24, 10, 0, 0]);
+
+        let update = UpdateMessage::from_octets(&raw, &SessionConfig::modern())
+            .unwrap();
+        assert_eq!(update.treatment(), UpdateTreatment::TreatAsWithdraw);
+    }
+
+    #[test]
+    fn malformed_atomic_aggregate_uses_attribute_discard() {
+        let mut raw = vec![0xff; 16];
+        raw.extend_from_slice(&27u16.to_be_bytes());
+        raw.push(2);
+        raw.extend_from_slice(&0u16.to_be_bytes());
+        raw.extend_from_slice(&4u16.to_be_bytes());
+        raw.extend_from_slice(&[0x40, 6, 1, 0]);
+
+        let update = UpdateMessage::from_octets(&raw, &SessionConfig::modern())
+            .unwrap();
+        assert_eq!(update.treatment(), UpdateTreatment::AttributeDiscard);
     }
 
     #[ignore = "this could/should now happen on PduParseInfo level?"]
