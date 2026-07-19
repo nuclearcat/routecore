@@ -597,10 +597,9 @@ impl<C: BgpConfig + Send> Session<C> {
                 //- starts the ConnectRetryTimer with the initial value,
                 self.connect_retry_timer.start();
 
-                //- initiates a TCP connection to the other BGP peer,
-                // TODO, we focus on ManualStartWithPassiveTcpEstablishment
-                // first.
-                todo!();
+                // Active connection establishment is performed by the owner,
+                // which attaches the resulting stream to this session.
+                debug!("waiting for an actively established TCP stream");
 
                 //- listens for a connection that may be initiated by the remote
                 //  BGP peer, and
@@ -686,7 +685,11 @@ impl<C: BgpConfig + Send> Session<C> {
                 self.set_state(State::Idle);
             }
             (S::Connect, E::ConnectRetryTimerExpires) => {
-                todo!();
+                warn!("connect retry expired; waiting for a replacement stream");
+                if self.connection.is_some() {
+                    self.drop_connection();
+                }
+                self.delay_open_timer.stop_and_reset();
                 //- drops the TCP connection,
                 //- restarts the ConnectRetryTimer,
                 //- stops the DelayOpenTimer and resets the timer to zero,
@@ -750,7 +753,12 @@ impl<C: BgpConfig + Send> Session<C> {
             }
             (S::Connect, E::TcpConnectionFails) => {
                 if self.delay_open_timer.is_running() {
-                    todo!();
+                    self.delay_open_timer.stop_and_reset();
+                    self.connect_retry_timer.start();
+                    if self.connection.is_some() {
+                        self.drop_connection();
+                    }
+                    self.set_state(State::Active);
                     //- restarts the ConnectRetryTimer with the initial value,
                     //- stops the DelayOpenTimer and resets its value to zero,
                     //- continues to listen for a connection that may be
@@ -771,13 +779,16 @@ impl<C: BgpConfig + Send> Session<C> {
                 }
             }
             // optional:
-            (S::Connect, E::BgpOpenWithDelayOpenTimerRunning(_open_msg)) => {
+            (S::Connect, E::BgpOpenWithDelayOpenTimerRunning(open_msg)) => {
                 // The TCP connection has been established but we waited for
                 // the other side to send a BGP OPEN first, which now
                 // happened. 
 
                 debug!("Received OPEN during DelayOpen");
-                todo!();
+                self.set_state(State::Active);
+                return Box::pin(self.handle_event(
+                    Event::BgpOpenWithDelayOpenTimerRunning(open_msg.clone())
+                )).await;
 
         //- stops the ConnectRetryTimer (if running) and sets the
         //  ConnectRetryTimer to zero,
@@ -803,8 +814,13 @@ impl<C: BgpConfig + Send> Session<C> {
 
         //- and changes its state to OpenConfirm.
             }
-            (S::Connect, E::BgpHeaderErr | E::BgpOpenMsgErr) => { todo!() }
-            (S::Connect, E::NotifMsgVerErr) => { todo!() }
+            (S::Connect, E::BgpHeaderErr | E::BgpOpenMsgErr | E::NotifMsgVerErr) => {
+                self.disconnect(DisconnectReason::FsmViolation(None));
+                self.connect_retry_timer.stop_and_reset();
+                self.delay_open_timer.stop_and_reset();
+                self.increase_connect_retry_counter();
+                self.set_state(State::Idle);
+            }
             (S::Connect, 
                 //E::AutomaticStop |
                 E::HoldTimerExpires |
@@ -892,7 +908,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 // which is not part of 4271.
                 if self.config.is_exact() {
                     //- initiates a TCP connection to the other BGP peer,
-                    todo!();
+                    debug!("waiting for an actively established TCP stream");
 
                     //- continues to listen for a TCP connection that may be
                     //  initiated by a remote BGP peer
@@ -1079,7 +1095,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 //appropriate error code if the SendNOTIFICATIONwithoutOPEN
                 //attribute is set to TRUE,
                 if self.attributes().notification_without_open() {
-                    todo!();
+                    self.disconnect(DisconnectReason::FsmViolation(None));
                 }
 
                 //- sets the ConnectRetryTimer to zero,
@@ -1237,7 +1253,7 @@ impl<C: BgpConfig + Send> Session<C> {
             (S::OpenSent,
              //E::TcpConnectionValid | // optional
              E::TcpCrAcked | E::TcpConnectionConfirmed ) => {
-                todo!()
+                warn!("ignoring a second TCP connection in OpenSent");
                   //If a TcpConnection_Valid (Event 14), Tcp_CR_Acked (Event
                   //16), or a TcpConnectionConfirmed event (Event 17) is
                   //received, a second TCP connection may be in progress.
@@ -1516,8 +1532,7 @@ impl<C: BgpConfig + Send> Session<C> {
             (S::OpenConfirm,
              //E::TcpConnectionValid | // optional
              E::TcpCrAcked | E::TcpConnectionConfirmed ) => {
-                todo!()
-                // TODO: track second connection
+                warn!("ignoring a second TCP connection in OpenConfirm");
             }
 
             // optional:
@@ -1564,8 +1579,10 @@ impl<C: BgpConfig + Send> Session<C> {
                 //    Section 6.8.  If this connection is to be dropped due to
                 //    connection collision, the local system:
 
-                //TODO implement the collision resolution
-                todo!();
+                self.disconnect(DisconnectReason::FsmViolation(Some(
+                    FiniteStateMachineSubcode::
+                        UnexpectedMessageInOpenConfirmState.into()
+                )));
                        
                 //- sends a NOTIFICATION with a Cease,
                 //self.disconnect(DisconnectReason::Collision).await;
@@ -1736,13 +1753,14 @@ impl<C: BgpConfig + Send> Session<C> {
                 // successfully established (Event 16 or Event 17), the second
                 // connection SHALL be tracked until it sends an OPEN message.
 
-                // TODO implement collision detection.
-                todo!()
+                warn!("ignoring a second TCP connection in Established");
             }
             (S::Established, E::BgpOpen(_)) => {
-                todo!()
-                // once CollisionDetectEstablishedState is implemented, things
-                // need to happen here
+                self.disconnect(DisconnectReason::FsmViolation(Some(
+                    FiniteStateMachineSubcode::
+                        UnexpectedMessageInEstablishedState.into()
+                )));
+                self.set_state(State::Idle);
             }
             // optional:
             //(S::Established, E::OpenCollisionDump) => { todo!() }
