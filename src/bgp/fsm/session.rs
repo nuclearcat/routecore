@@ -397,7 +397,9 @@ impl<C: BgpConfig + Send> Session<C> {
         openbuilder.set_bgp_id(self.config.bgp_id());
 
         openbuilder.four_octet_capable(self.config.local_asn());
-        openbuilder.extended_message_capable();
+        if self.config.extended_messages() {
+            openbuilder.extended_message_capable();
+        }
 
         for afisafi in &self.config.protocols() {
             openbuilder.add_mp(*afisafi);
@@ -2012,6 +2014,11 @@ pub trait BgpConfig {
 
     fn protocols(&self) -> Vec<AfiSafiType>;
     fn addpath(&self) -> Vec<AfiSafiType>;
+
+    /// Returns whether the session should advertise Extended Message support.
+    fn extended_messages(&self) -> bool {
+        true
+    }
 }
 
 //------------ BasicConfig ---------------------------------------------------
@@ -2032,6 +2039,7 @@ pub struct BasicConfig {
     pub remote_asn: Asn,
     pub remote_addr: IpAddr,
     pub hold_time: Option<u16>,
+    extended_messages: bool,
     _capabilities: Vec<Capability<Vec<u8>>>,
 }
 
@@ -2049,8 +2057,14 @@ impl BasicConfig {
             remote_asn,
             remote_addr,
             hold_time,
+            extended_messages: true,
             _capabilities: vec![],
         }
+    }
+
+    /// Enables or disables Extended Message capability advertisement.
+    pub fn set_extended_messages(&mut self, enabled: bool) {
+        self.extended_messages = enabled;
     }
 }
 
@@ -2085,6 +2099,10 @@ impl BgpConfig for BasicConfig {
 
     fn addpath(&self) -> Vec<AfiSafiType> {
         vec![]
+    }
+
+    fn extended_messages(&self) -> bool {
+        self.extended_messages
     }
 }
 
@@ -2355,6 +2373,21 @@ mod negotiated_addpaths_tests {
 
         negotiated.remote_capabilities = vec![6, 0];
         assert!(SessionConfig::from(&negotiated).extended_messages());
+    }
+
+    #[test]
+    fn basic_config_enables_extended_messages_by_default_and_can_opt_out() {
+        let mut config = BasicConfig::new(
+            Asn::from_u32(64512),
+            [192, 0, 2, 1],
+            IpAddr::V4([192, 0, 2, 2].into()),
+            Asn::from_u32(64513),
+            None,
+        );
+
+        assert!(config.extended_messages());
+        config.set_extended_messages(false);
+        assert!(!config.extended_messages());
     }
 
     #[test]
