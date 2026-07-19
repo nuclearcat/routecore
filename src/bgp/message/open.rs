@@ -448,7 +448,7 @@ impl<Octs: Octets> Capability<Octs> {
             CapabilityType::BgpRole => {
                 if len != 1 {
                     return Err(ParseError::form_error(
-                            "ExtendedMessage Capability with length != 1"
+                            "BgpRole Capability with length != 1"
                     ));
                 }
                 let _role = parser.parse_u8()?;
@@ -973,6 +973,16 @@ mod tests {
         assert_eq!(open.identifier(), &[192, 0, 2, 1]);
         assert_eq!(open.opt_parm_len(), 0);
         assert_eq!(open.parameters().count(), 0);
+    }
+
+    #[test]
+    fn malformed_bgp_role_reports_the_right_capability() {
+        let bytes = &[0x09, 0x00][..];
+        let mut parser = Parser::from_ref(&bytes);
+
+        let err = Capability::<&[u8]>::parse(&mut parser).err().unwrap();
+
+        assert_eq!(err.to_string(), "BgpRole Capability with length != 1");
     }
 
     #[test]
