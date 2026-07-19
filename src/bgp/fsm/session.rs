@@ -207,25 +207,25 @@ impl<C: BgpConfig + Send> Session<C> {
         let remote_addr = self.connected_addr();
         match reason {
             DisconnectReason::ConnectionRejected => {
-                self.send_notification(CeaseSubcode::ConnectionRejected);
+                self.send_notification(CeaseSubcode::ConnectionRejected).await;
             }
             DisconnectReason::Reconfiguration => {
                 self.send_notification(
                     CeaseSubcode::OtherConfigurationChange,
-                );
+                ).await;
             }
             DisconnectReason::Deconfigured => {
-                self.send_notification(CeaseSubcode::PeerDeconfigured);
+                self.send_notification(CeaseSubcode::PeerDeconfigured).await;
             }
             DisconnectReason::HoldTimerExpired => {
-                self.send_notification(Details::HoldTimerExpired);
+                self.send_notification(Details::HoldTimerExpired).await;
             }
             DisconnectReason::Shutdown => {
-                self.send_notification(CeaseSubcode::AdministrativeShutdown);
+                self.send_notification(CeaseSubcode::AdministrativeShutdown).await;
             }
             DisconnectReason::FsmViolation(maybe_notification) => {
                 if let Some(details) = maybe_notification {
-                    self.send_notification(details);
+                    self.send_notification(details).await;
                 }
             }
             DisconnectReason::Other => {
@@ -298,7 +298,7 @@ impl<C: BgpConfig + Send> Session<C> {
                         self.disconnect(reason).await;
                     }
                     Command::ForcedKeepalive => {
-                        self.send_keepalive();
+                        self.send_keepalive().await;
                     }
                     //Command::RawUpdate(pdu) => {
                     //    debug!("got Command::RawUpdate");
@@ -340,7 +340,7 @@ impl<C: BgpConfig + Send> Session<C> {
                     Err(e) => {
                         error!("{e}");
                         if let Some(notification) = e.notification() {
-                            self.send_pdu(notification);
+                            self.send_pdu(notification).await;
                         }
                         self.connection = None;
                         self.set_state(State::Connect);
@@ -396,13 +396,13 @@ impl<C: BgpConfig + Send> Session<C> {
         }
     }
     */
-    fn send_pdu(&self, pdu: BgpMsg<Bytes>) {
-        if self.pdu_out_tx.try_send(pdu).is_err() {
-            warn!("outgoing pdu queue blocked");
+    async fn send_pdu(&self, pdu: BgpMsg<Bytes>) {
+        if self.pdu_out_tx.send(pdu).await.is_err() {
+            warn!("outgoing pdu queue closed");
         }
     }
 
-    pub fn send_open(&mut self) {
+    pub async fn send_open(&mut self) {
         let mut openbuilder =
             OpenBuilder::from_target(BytesMut::new()).unwrap();
         openbuilder.set_asn(self.config.local_asn());
@@ -434,7 +434,7 @@ impl<C: BgpConfig + Send> Session<C> {
 
         let open_msg = openbuilder.into_message();
         self.set_local_capabilities(open_msg.capabilities_as_vec());
-        self.send_pdu(BgpMsg::Open(open_msg));
+        self.send_pdu(BgpMsg::Open(open_msg)).await;
     }
 
     fn set_local_capabilities(&mut self, capabilities: Vec<u8>) {
@@ -445,7 +445,7 @@ impl<C: BgpConfig + Send> Session<C> {
         self.local_capabilities.as_ref()
     }
 
-    fn send_notification<S>(&self, subcode: S)
+    async fn send_notification<S>(&self, subcode: S)
     where
         S: Into<Details>,
     {
@@ -453,15 +453,15 @@ impl<C: BgpConfig + Send> Session<C> {
         //self.send_raw(msg);
         self.send_pdu(BgpMsg::Notification(
             NotificationMessage::from_octets(Bytes::from(msg)).unwrap(),
-        ));
+        )).await;
     }
 
-    fn send_keepalive(&self) {
+    async fn send_keepalive(&self) {
         self.send_pdu(BgpMsg::Keepalive(
             KeepaliveBuilder::from_target(BytesMut::new())
                 .unwrap()
                 .into_message(),
-        ));
+        )).await;
     }
 
     /// Returns the local ASN for this session.
@@ -703,7 +703,7 @@ impl<C: BgpConfig + Send> Session<C> {
             // optional events:
             (S::Connect, E::DelayOpenTimerExpires) => {
                     //- sends an OPEN message to its peer,
-                    self.send_open();
+                    self.send_open().await;
 
                     //- sets the HoldTimer to a large value, and
                     // TODO
@@ -740,7 +740,7 @@ impl<C: BgpConfig + Send> Session<C> {
                     //  TODO (do we need to do something here?)
 
                     //  - sends an OPEN message to its peer,
-                    self.send_open();
+                    self.send_open().await;
 
 
                     //  - set the HoldTimer to a large value (suggested: 4min)
@@ -942,7 +942,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 // TODO anything?
 
                 //- sends the OPEN message to its remote peer,
-                self.send_open();
+                self.send_open().await;
 
                 //- sets its hold timer to a large value, and
                 // TODO
@@ -977,7 +977,7 @@ impl<C: BgpConfig + Send> Session<C> {
 
                     //  - sends the OPEN message to its peer,
                     debug!("send_open in Active, no DelayOpen");
-                    self.send_open();
+                    self.send_open().await;
 
                     //  - sets its HoldTimer to a large value (sugg: 4min), 
                     //  TODO
@@ -1042,7 +1042,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 debug!("addpath intersection: {:?}", &intersection);
 
 
-                self.send_open();
+                self.send_open().await;
                 let negotiated = NegotiatedConfig {
                     hold_time: std::cmp::min(open_msg.holdtime(), self.hold_time()),
                     // TODO rename .identifier() and its return type in
@@ -1069,7 +1069,7 @@ impl<C: BgpConfig + Send> Session<C> {
 
 
                 //- sends a KEEPALIVE message,
-                self.send_keepalive();
+                self.send_keepalive().await;
 
                 // TODO support for holdtime == 0
                 //- if the HoldTimer value is non-zero,
@@ -1364,7 +1364,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 let _ = self.channel.send(Message::SessionNegotiated(negotiated)).await;
 
                 //- sends a KEEPALIVE message, and
-                self.send_keepalive();
+                self.send_keepalive().await;
 
                 //- sets a KeepaliveTimer:
                 // If the negotiated hold time value is zero, then the
@@ -1522,7 +1522,7 @@ impl<C: BgpConfig + Send> Session<C> {
             }
             (S::OpenConfirm, E::KeepaliveTimerExpires) => {
                 //- sends a KEEPALIVE message,
-                self.send_keepalive();
+                self.send_keepalive().await;
 
                 //- restarts the KeepaliveTimer
                 // (Our Timers restart automatically)
@@ -1739,7 +1739,7 @@ impl<C: BgpConfig + Send> Session<C> {
             }
             (S::Established, E::KeepaliveTimerExpires) => {
                 //- sends a KEEPALIVE message, and
-                self.send_keepalive();
+                self.send_keepalive().await;
 
                 //- restarts its KeepaliveTimer, unless the negotiated
                 //  HoldTime value is zero.
