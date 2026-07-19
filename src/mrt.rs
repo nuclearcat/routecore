@@ -473,19 +473,22 @@ impl<'a> MrtFile<'a> {
     }
 
     pub fn rib_entries_mt<Octs: 'a + Octets>(&'a self)
-        -> impl ParallelIterator<Item =
+        -> Result<impl ParallelIterator<Item =
                     <SingleEntryIterator<'a, Octs> as Iterator>::Item
-                > + 'a
+                > + 'a, ParseError>
     where
         Vec<u8>: OctetsFrom<Octs::Range<'a>>
     {
         let mut parser = Parser::from_ref(&self.raw);
-        let peer_index = Self::extract_peer_index_table(&mut parser).unwrap();
+        let peer_index = Self::extract_peer_index_table(&mut parser)?;
 
         let tables = TableDumpIterator::new(peer_index, parser);
-        tables.par_bridge().map(|(_fam, reh)|{
-            SingleEntryIterator::new(reh)
-        }).flat_map_iter(|e| e.into_iter())
+        Ok(tables.par_bridge().flat_map_iter(|table| {
+            match table {
+                Ok((_fam, reh)) => SingleEntryIterator::new(reh).collect(),
+                Err(err) => vec![Err(err)],
+            }
+        }))
     }
 
     pub fn tables(
@@ -947,11 +950,12 @@ impl<'a, Octs: Octets> Iterator for UpdateIterator<'a, Octs> {
 pub struct TableDumpIterator<'a, Octs> {
     pub peer_index: PeerIndex,
     parser: Parser<'a, Octs>,
+    fused: bool,
 }
 
 impl<'a, Octs> TableDumpIterator<'a, Octs> {
     pub fn new(peer_index: PeerIndex, parser: Parser<'a, Octs>) -> Self {
-        Self { peer_index, parser }
+        Self { peer_index, parser, fused: false }
     }
 }
 
@@ -959,33 +963,38 @@ impl<'a, Octs: Octets> Iterator for TableDumpIterator<'a, Octs>
 where
     Vec<u8>: OctetsFrom<Octs::Range<'a>>
 {
-    type Item = (AfiSafiType, RibEntryHeader<'a, Octs>);
+    type Item = Result<(AfiSafiType, RibEntryHeader<'a, Octs>), ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        
-        if self.parser.remaining() == 0 {
-            return None;
-        }
-
-        let mut m = CommonHeader::parse(&mut self.parser).unwrap();
-        if let MessageSubType::TableDumpv2SubType(tdv2) = m.subtype() {
-            match tdv2 {
-                TableDumpv2SubType::RibIpv4Unicast => {
-                    let reh = RibEntryHeader::parse(
-                        &mut m.message, Afi::Ipv4
-                    ).unwrap();
-                    Some((AfiSafiType::Ipv4Unicast, reh))
-                }
-                TableDumpv2SubType::RibIpv6Unicast => {
-                    let reh = RibEntryHeader::parse(
-                        &mut m.message, Afi::Ipv6
-                    ).unwrap();
-                    Some((AfiSafiType::Ipv6Unicast, reh))
-                }
-                _ => todo!()
+        loop {
+            if self.fused || self.parser.remaining() == 0 {
+                return None;
             }
-        } else {
-            None
+
+            let mut m = match CommonHeader::parse(&mut self.parser) {
+                Ok(message) => message,
+                Err(err) => {
+                    self.fused = true;
+                    return Some(Err(err));
+                }
+            };
+            let MessageSubType::TableDumpv2SubType(tdv2) = m.subtype()
+            else {
+                continue;
+            };
+            let result = match tdv2 {
+                TableDumpv2SubType::RibIpv4Unicast => RibEntryHeader::parse(
+                    &mut m.message, Afi::Ipv4
+                ).map(|reh| (AfiSafiType::Ipv4Unicast, reh)),
+                TableDumpv2SubType::RibIpv6Unicast => RibEntryHeader::parse(
+                    &mut m.message, Afi::Ipv6
+                ).map(|reh| (AfiSafiType::Ipv6Unicast, reh)),
+                _ => continue,
+            };
+            if result.is_err() {
+                self.fused = true;
+            }
+            return Some(result);
         }
     }
 }
@@ -993,6 +1002,7 @@ where
 pub struct SingleEntryIterator<'a, Octs> {
     prefix: Prefix,
     parser: Parser<'a, Octs>, // the RibEntryHeader.entries parser
+    fused: bool,
 }
 
 impl<'a, Octs> SingleEntryIterator<'a, Octs> {
@@ -1000,6 +1010,7 @@ impl<'a, Octs> SingleEntryIterator<'a, Octs> {
         Self {
             prefix: reh.prefix,
             parser: reh.entries,
+            fused: false,
         }
     }
 }
@@ -1008,18 +1019,24 @@ impl<'a, Octs: Octets> Iterator for SingleEntryIterator<'a, Octs>
 where
     Vec<u8>: OctetsFrom<Octs::Range<'a>>
 {
-    type Item = (Prefix, u16, Vec<u8>);
+    type Item = Result<(Prefix, u16, Vec<u8>), ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.parser.remaining() == 0 {
+        if self.fused || self.parser.remaining() == 0 {
             return None;
         }
-        let re = RibEntry::parse(&mut self.parser).unwrap();
+        let re = match RibEntry::parse(&mut self.parser) {
+            Ok(entry) => entry,
+            Err(err) => {
+                self.fused = true;
+                return Some(Err(err));
+            }
+        };
         let mut v = re.attributes;
         let mut raw_attr = vec![0; v.remaining()];
         let _ = v.parse_buf(&mut raw_attr[..]);
 
-        Some((self.prefix, re.peer_idx, raw_attr))
+        Some(Ok((self.prefix, re.peer_idx, raw_attr)))
     }
 }
 
@@ -1090,6 +1107,7 @@ pub struct RibEntryIterator<'a, Octs> {
     parser: Parser<'a, Octs>,
     current_table: Option<(RibEntryNlri, Parser<'a, Octs>)>,
     current_afisafi: Option<AfiSafiType>,
+    fused: bool,
 }
 impl<'a, Octs> RibEntryIterator<'a, Octs> {
     fn new(peer_index: PeerIndex, parser: Parser<'a, Octs>) -> Self {
@@ -1098,6 +1116,7 @@ impl<'a, Octs> RibEntryIterator<'a, Octs> {
             parser,
             current_table: None,
             current_afisafi: None,
+            fused: false,
         }
     }
 }
@@ -1107,23 +1126,41 @@ impl<'a, Octs: Octets> Iterator for RibEntryIterator<'a, Octs>
 where
     Vec<u8>: OctetsFrom<Octs::Range<'a>>
 {
-    type Item = (AfiSafiType, u16, PeerEntry, RibEntryNlri, Vec<u8>);
+    type Item = Result<
+        (AfiSafiType, u16, PeerEntry, RibEntryNlri, Vec<u8>),
+        ParseError
+    >;
 
     fn next(&mut self) -> Option<Self::Item>
     {
+        if self.fused {
+            return None;
+        }
         while self.current_table.is_none() {
             if self.parser.remaining() == 0 {
                 return None;
             }
 
-            let mut m = CommonHeader::parse(&mut self.parser).unwrap();
+            let mut m = match CommonHeader::parse(&mut self.parser) {
+                Ok(message) => message,
+                Err(err) => {
+                    self.fused = true;
+                    return Some(Err(err));
+                }
+            };
 
             if let MessageSubType::TableDumpv2SubType(tdv2) = m.subtype() {
                 match tdv2 {
                     TableDumpv2SubType::RibIpv4Unicast => {
-                        let reh = RibEntryHeader::parse(
+                        let reh = match RibEntryHeader::parse(
                             &mut m.message, Afi::Ipv4
-                        ).unwrap();
+                        ) {
+                            Ok(header) => header,
+                            Err(err) => {
+                                self.fused = true;
+                                return Some(Err(err));
+                            }
+                        };
                         let entries = reh.entries;
                         self.current_table = Some((
                             RibEntryNlri::Prefix(reh.prefix()),
@@ -1132,9 +1169,15 @@ where
                         self.current_afisafi = Some(AfiSafiType::Ipv4Unicast);
                     }
                     TableDumpv2SubType::RibIpv6Unicast => {
-                        let reh = RibEntryHeader::parse(
+                        let reh = match RibEntryHeader::parse(
                             &mut m.message, Afi::Ipv6
-                        ).unwrap();
+                        ) {
+                            Ok(header) => header,
+                            Err(err) => {
+                                self.fused = true;
+                                return Some(Err(err));
+                            }
+                        };
                         let entries = reh.entries;
                         self.current_table = Some((
                             RibEntryNlri::Prefix(reh.prefix()),
@@ -1150,7 +1193,11 @@ where
                             }
                             // Unsupported family or malformed record:
                             // skip it rather than panic.
-                            Ok(None) | Err(_) => continue,
+                            Ok(None) => continue,
+                            Err(err) => {
+                                self.fused = true;
+                                return Some(Err(err));
+                            }
                         }
                     }
                     // Peer index tables, multicast RIBs and unknown
@@ -1163,8 +1210,19 @@ where
         }
 
         let (nlri, mut entries) = self.current_table.take().unwrap();
-        let re = RibEntry::parse(&mut entries).unwrap();
-        let peer = self.peer_index.get(&re).unwrap();
+        let re = match RibEntry::parse(&mut entries) {
+            Ok(entry) => entry,
+            Err(err) => {
+                self.fused = true;
+                return Some(Err(err));
+            }
+        };
+        let Some(peer) = self.peer_index.get(&re) else {
+            self.fused = true;
+            return Some(Err(ParseError::form_error(
+                "RIB entry references an unknown peer"
+            )));
+        };
         // XXX here we probably need a PduParseInfo::mrt()
 
         let mut v = re.attributes;
@@ -1176,13 +1234,13 @@ where
             self.current_table = Some((nlri.clone(), entries));
         }
 
-        Some((
+        Some(Ok((
             *self.current_afisafi.as_ref().unwrap(),
             re.peer_idx,
             *peer,
             nlri,
             raw_attr
-        ))
+        )))
     }
 }
 

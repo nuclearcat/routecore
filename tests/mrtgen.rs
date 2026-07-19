@@ -73,7 +73,8 @@ fn parses_generated_table_dump_v2_routes() {
 
     assert_eq!(file.pi().expect("peer index parses").len(), 2);
     let entries = file.rib_entries().expect("RIB iterator starts")
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()
+        .expect("RIB entries parse");
     assert_eq!(entries.len(), 2);
 
     assert_eq!(entries[0].0, AfiSafiType::Ipv4Unicast);
@@ -85,6 +86,18 @@ fn parses_generated_table_dump_v2_routes() {
     assert_eq!(entries[1].3.to_string(), "2001:db8:100::/48");
     assert_eq!(entries[1].2.asn.into_u32(), 64500);
     assert!(!entries[1].4.is_empty());
+}
+
+#[test]
+fn malformed_rib_entry_is_reported_and_fuses() {
+    let mut bytes = generated_routes(RouteFormat::TableDumpV2).bytes;
+    bytes.pop();
+    let file = MrtFile::new(&bytes);
+    let mut entries = file.rib_entries().expect("peer index parses");
+
+    assert!(entries.next().expect("first route is present").is_ok());
+    assert!(entries.next().expect("truncated route is reported").is_err());
+    assert!(entries.next().is_none());
 }
 
 #[test]
