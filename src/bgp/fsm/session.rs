@@ -7,8 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::bgp::message::keepalive::KeepaliveBuilder;
 use crate::bgp::message::notification::{
-    CeaseSubcode, Details, FiniteStateMachineSubcode, NotificationBuilder,
-    OpenMessageSubcode,
+    CeaseSubcode, Details, FiniteStateMachineSubcode, MessageHeaderSubcode,
+    NotificationBuilder, OpenMessageSubcode,
 };
 use crate::bgp::message::open::{Capabilities, Capability, CapabilityType, OpenBuilder};
 use crate::bgp::message::{
@@ -329,6 +329,9 @@ impl<C: BgpConfig + Send> Session<C> {
                     }
                     Err(e) => {
                         error!("{e}");
+                        if let Some(notification) = e.notification() {
+                            self.send_pdu(notification);
+                        }
                         self.connection = None;
                         self.set_state(State::Connect);
                         return Err(Error { msg: "error from read_frame" });
@@ -1932,7 +1935,9 @@ impl Connection {
     }
     */
 
-    async fn read_frame(&mut self) -> Result<Option<BgpMsg<Bytes>>, Error> {
+    async fn read_frame(
+        &mut self,
+    ) -> Result<Option<BgpMsg<Bytes>>, FrameError> {
         loop {
             if let Some(frame) = self.parse_frame()? {
                 return Ok(Some(frame));
@@ -1941,15 +1946,12 @@ impl Connection {
                 if self.buffer.is_empty() {
                     return Ok(None);
                 }
-                return Err(Error::for_str("connection reset by peer"));
+                return Err(FrameError::Io);
             }
         }
     }
 
-    // XXX maybe turn this into a take_frame
-    // and do the parsing within the FSM so we can send the correct
-    // NOTIFICATIONs etc?
-    fn parse_frame(&mut self) -> Result<Option<BgpMsg<Bytes>>, ParseError> {
+    fn parse_frame(&mut self) -> Result<Option<BgpMsg<Bytes>>, FrameError> {
         parse_frame(&mut self.buffer, &self.session_config)
     }
 }
@@ -1957,29 +1959,48 @@ impl Connection {
 fn parse_frame(
     buffer: &mut BytesMut,
     session_config: &SessionConfig,
-) -> Result<Option<BgpMsg<Bytes>>, ParseError> {
+) -> Result<Option<BgpMsg<Bytes>>, FrameError> {
+    if buffer.len() < 16 {
+        return Ok(None);
+    }
+
+    if buffer[..16] != [0xff; 16] {
+        return Err(FrameError::Header {
+            subcode: MessageHeaderSubcode::ConnectionNotSynchronized,
+            data: Vec::new(),
+        });
+    }
     if buffer.len() < 18 {
         return Ok(None);
     }
 
     let len = u16::from_be_bytes([buffer[16], buffer[17]]) as usize;
     if len < 19 {
-        return Err(ParseError::form_error("BGP message length below 19"));
+        return Err(FrameError::bad_length(len as u16));
     }
     if buffer.len() < 19 {
         return Ok(None);
     }
 
-    let extended = session_config.extended_messages();
-    let max_len = match buffer[18] {
-        1 | 4 => 4096, // OPEN and KEEPALIVE are never extended.
-        _ if extended => u16::MAX as usize,
-        _ => 4096,
+    let message_type = buffer[18];
+    if len > session_config.max_message_len() {
+        return Err(FrameError::bad_length(len as u16));
+    }
+    let (min_len, max_len) = match message_type {
+        1 => (29, 4096),
+        2 => (23, session_config.max_message_len()),
+        3 => (21, session_config.max_message_len()),
+        4 => (19, 19),
+        5 => (23, session_config.max_message_len()),
+        invalid => {
+            return Err(FrameError::Header {
+                subcode: MessageHeaderSubcode::BadMessageType,
+                data: vec![invalid],
+            })
+        }
     };
-    if len > max_len {
-        return Err(ParseError::form_error(
-            "BGP message exceeds negotiated maximum length",
-        ));
+    if len < min_len || len > max_len {
+        return Err(FrameError::bad_length(len as u16));
     }
     if buffer.len() < len {
         return Ok(None);
@@ -1993,11 +2014,66 @@ fn parse_frame(
 
 async fn maybe_read_frame(
     conn: Option<&mut Connection>,
-) -> Option<Result<Option<BgpMsg<Bytes>>, Error>> {
+) -> Option<Result<Option<BgpMsg<Bytes>>, FrameError>> {
     if let Some(c) = conn {
         Some(c.read_frame().await)
     } else {
         None
+    }
+}
+
+#[derive(Debug)]
+enum FrameError {
+    Io,
+    Parse(ParseError),
+    Header {
+        subcode: MessageHeaderSubcode,
+        data: Vec<u8>,
+    },
+}
+
+impl FrameError {
+    fn bad_length(length: u16) -> Self {
+        Self::Header {
+            subcode: MessageHeaderSubcode::BadMessageLength,
+            data: length.to_be_bytes().to_vec(),
+        }
+    }
+
+    fn notification(&self) -> Option<BgpMsg<Bytes>> {
+        let Self::Header { subcode, data } = self else {
+            return None;
+        };
+        let message = NotificationBuilder::new_vec(*subcode, Some(data))
+            .expect("message-header notification data is bounded");
+        Some(BgpMsg::Notification(
+            NotificationMessage::from_octets(Bytes::from(message))
+                .expect("locally built notification is valid"),
+        ))
+    }
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io => f.write_str("BGP connection I/O error"),
+            Self::Parse(err) => write!(f, "BGP message parse error: {err}"),
+            Self::Header { subcode, .. } => {
+                write!(f, "BGP message header error: {subcode}")
+            }
+        }
+    }
+}
+
+impl From<std::io::Error> for FrameError {
+    fn from(_: std::io::Error) -> Self {
+        Self::Io
+    }
+}
+
+impl From<ParseError> for FrameError {
+    fn from(err: ParseError) -> Self {
+        Self::Parse(err)
     }
 }
 
@@ -2326,6 +2402,38 @@ mod tests {
 mod negotiated_addpaths_tests {
     use super::*;
 
+    fn header(message_type: u8, length: u16) -> BytesMut {
+        let mut bytes = vec![0xff; 19];
+        bytes[16..18].copy_from_slice(&length.to_be_bytes());
+        bytes[18] = message_type;
+        BytesMut::from(bytes.as_slice())
+    }
+
+    fn assert_header_notification(
+        error: FrameError,
+        expected_subcode: MessageHeaderSubcode,
+        expected_data: Option<&[u8]>,
+    ) {
+        let FrameError::Header { subcode, ref data } = error else {
+            panic!("expected message-header error")
+        };
+        assert_eq!(subcode, expected_subcode);
+        assert_eq!(
+            (!data.is_empty()).then_some(data.as_slice()),
+            expected_data
+        );
+
+        let Some(BgpMsg::Notification(notification)) = error.notification()
+        else {
+            panic!("expected message-header NOTIFICATION")
+        };
+        assert_eq!(
+            notification.details(),
+            Details::MessageHeaderError(expected_subcode)
+        );
+        assert_eq!(notification.data(), expected_data);
+    }
+
     fn oversized_update(len: usize) -> BytesMut {
         assert!(len > 4096 && len <= u16::MAX as usize);
         let mut bytes = vec![0xff; len];
@@ -2399,9 +2507,10 @@ mod negotiated_addpaths_tests {
             Ok(_) => panic!("oversized UPDATE unexpectedly accepted"),
         };
 
-        assert_eq!(
-            err.to_string(),
-            "BGP message exceeds negotiated maximum length"
+        assert_header_notification(
+            err,
+            MessageHeaderSubcode::BadMessageLength,
+            Some(&4097_u16.to_be_bytes()),
         );
         assert_eq!(bytes.len(), 4097);
     }
@@ -2425,6 +2534,64 @@ mod negotiated_addpaths_tests {
         let mut bytes = oversized_update(4097);
         bytes[18] = 1;
 
-        assert!(parse_frame(&mut bytes, &config).is_err());
+        let err = parse_frame(&mut bytes, &config).err().unwrap();
+        assert_header_notification(
+            err,
+            MessageHeaderSubcode::BadMessageLength,
+            Some(&4097_u16.to_be_bytes()),
+        );
+    }
+
+    #[test]
+    fn invalid_marker_and_type_generate_header_notifications() {
+        let mut bad_marker = header(4, 19);
+        bad_marker[0] = 0;
+        let err = parse_frame(&mut bad_marker, &SessionConfig::modern())
+            .err().unwrap();
+        assert_header_notification(
+            err,
+            MessageHeaderSubcode::ConnectionNotSynchronized,
+            None,
+        );
+
+        let mut bad_type = header(99, 19);
+        let err = parse_frame(&mut bad_type, &SessionConfig::modern())
+            .err().unwrap();
+        assert_header_notification(
+            err,
+            MessageHeaderSubcode::BadMessageType,
+            Some(&[99]),
+        );
+
+        let mut oversized_unknown = header(99, 4097);
+        let err = parse_frame(
+            &mut oversized_unknown,
+            &SessionConfig::modern(),
+        ).err().unwrap();
+        assert_header_notification(
+            err,
+            MessageHeaderSubcode::BadMessageLength,
+            Some(&4097_u16.to_be_bytes()),
+        );
+    }
+
+    #[test]
+    fn message_type_minimum_lengths_generate_bad_length_notifications() {
+        for (message_type, length) in [
+            (1, 28_u16),
+            (2, 22),
+            (3, 20),
+            (4, 20),
+            (5, 22),
+        ] {
+            let mut bytes = header(message_type, length);
+            let err = parse_frame(&mut bytes, &SessionConfig::modern())
+                .err().unwrap();
+            assert_header_notification(
+                err,
+                MessageHeaderSubcode::BadMessageLength,
+                Some(&length.to_be_bytes()),
+            );
+        }
     }
 }
