@@ -341,7 +341,7 @@ impl<Octs: Octets> Parameter<Octs> {
         if typ == 2 {
             // There might be more than Capability within a single Optional
             // Parameter, so we need to loop.
-            while parser.pos() < pos + len {
+            while parser.pos() < pos + 2 + len {
                 Capability::parse(parser)?;
             }
         } else {
@@ -981,6 +981,16 @@ mod tests {
         let mut parser = Parser::from_ref(&bytes);
 
         let err = Capability::<&[u8]>::parse(&mut parser).err().unwrap();
+
+        assert_eq!(err.to_string(), "BgpRole Capability with length != 1");
+    }
+
+    #[test]
+    fn parameter_parser_validates_capabilities() {
+        let bytes = &[0x02, 0x02, 0x09, 0x00][..];
+        let mut parser = Parser::from_ref(&bytes);
+
+        let err = Parameter::<&[u8]>::parse(&mut parser).err().unwrap();
 
         assert_eq!(err.to_string(), "BgpRole Capability with length != 1");
     }
