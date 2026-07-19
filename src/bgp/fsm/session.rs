@@ -563,6 +563,7 @@ impl<C: BgpConfig + Send> Session<C> {
                 let _ = tx.send(Message::UpdateMessage(m)).await;
             }
             BgpMsg::Notification(m) => {
+                self.handle_event(Event::NotifMsg).await?;
                 let tx = self.channel.clone();
                 let _ = tx.send(Message::NotificationMessage(m)).await;
             }
