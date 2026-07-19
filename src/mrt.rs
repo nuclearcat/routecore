@@ -160,6 +160,11 @@ typeenum!(TableDumpv2SubType, u16,
     4 => RibIpv6Unicast,
     5 => RibIpv6Multicast,
     6 => RibGeneric,
+    8 => RibIpv4UnicastAddpath,
+    9 => RibIpv4MulticastAddpath,
+    10 => RibIpv6UnicastAddpath,
+    11 => RibIpv6MulticastAddpath,
+    12 => RibGenericAddpath,
     }
 );
 
@@ -171,6 +176,10 @@ typeenum!(Bgp4MpSubType, u16,
     5 => StateChangeAs4,
     6 => MessageLocal,
     7 => MessageAs4Local,
+    8 => MessageAddpath,
+    9 => MessageAs4Addpath,
+    10 => MessageLocalAddpath,
+    11 => MessageAs4LocalAddpath,
     }
 );
 
@@ -352,6 +361,7 @@ impl<Octs: Octets> fmt::Display for RibEntryHeader<'_, Octs> {
 pub struct RibEntry<'a, Octs> {
     peer_idx: u16,
     orig_time: u32,
+    path_id: Option<u32>,
     pub attributes: Parser<'a, Octs>,
 }
 
@@ -359,13 +369,30 @@ impl<'a, Octs: Octets> RibEntry<'a, Octs> {
     pub fn parse(parser: &mut Parser<'a, Octs>)
         -> Result<Self, ParseError>
     {
+        Self::parse_inner(parser, false)
+    }
+
+    pub fn parse_addpath(parser: &mut Parser<'a, Octs>)
+        -> Result<Self, ParseError>
+    {
+        Self::parse_inner(parser, true)
+    }
+
+    fn parse_inner(parser: &mut Parser<'a, Octs>, addpath: bool)
+        -> Result<Self, ParseError>
+    {
         let peer_idx = parser.parse_u16_be()?;
         let orig_time = parser.parse_u32_be()?;
+        let path_id = if addpath {
+            Some(parser.parse_u32_be()?)
+        } else {
+            None
+        };
         let attribute_len = parser.parse_u16_be()?;
         let attributes = parser.parse_parser(attribute_len as usize)?;
 
         Ok( RibEntry {
-            peer_idx, orig_time, attributes
+            peer_idx, orig_time, path_id, attributes
         })
     }
     pub fn peer_index(&self) -> u16 {
@@ -374,6 +401,10 @@ impl<'a, Octs: Octets> RibEntry<'a, Octs> {
 
     pub fn orig_time(&self) -> u32 {
         self.orig_time
+    }
+
+    pub fn path_id(&self) -> Option<u32> {
+        self.path_id
     }
 }
 
@@ -570,6 +601,16 @@ mod peer_index_tests {
         record
     }
 
+    fn record(subtype: u16, body: &[u8]) -> Vec<u8> {
+        let mut record = Vec::with_capacity(12 + body.len());
+        record.extend_from_slice(&0u32.to_be_bytes());
+        record.extend_from_slice(&13u16.to_be_bytes());
+        record.extend_from_slice(&subtype.to_be_bytes());
+        record.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        record.extend_from_slice(body);
+        record
+    }
+
     #[test]
     fn truncated_peer_entry_is_an_error() {
         let raw = peer_index_record(1, &[0]);
@@ -580,6 +621,26 @@ mod peer_index_tests {
     fn trailing_peer_entry_data_is_an_error() {
         let raw = peer_index_record(0, &[0]);
         assert!(MrtFile::new(&raw).pi().is_err());
+    }
+
+
+    #[test]
+    fn addpath_rib_entry_exposes_path_identifier() {
+        let peer = [0, 0, 0, 0, 1, 192, 0, 2, 1, 0, 100];
+        let mut raw = peer_index_record(1, &peer);
+        let mut rib = Vec::new();
+        rib.extend_from_slice(&1u32.to_be_bytes());
+        rib.extend_from_slice(&[8, 10]);
+        rib.extend_from_slice(&1u16.to_be_bytes());
+        rib.extend_from_slice(&0u16.to_be_bytes());
+        rib.extend_from_slice(&0u32.to_be_bytes());
+        rib.extend_from_slice(&42u32.to_be_bytes());
+        rib.extend_from_slice(&0u16.to_be_bytes());
+        raw.extend_from_slice(&record(8, &rib));
+
+        let entry = MrtFile::new(&raw)
+            .rib_entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.4, Some(42));
     }
 }
 
@@ -792,11 +853,20 @@ pub struct Message<'a, Octs> {
     afi: Afi,
     peer_addr: IpAddr,
     local_addr: IpAddr,
-    bgp_msg: Parser<'a, Octs>
+    bgp_msg: Parser<'a, Octs>,
+    addpath: bool,
 }
 
 impl<'a, Octs: Octets> Message<'a, Octs> {
     pub fn parse(parser: &mut Parser<'a, Octs>) -> Result<Self, ParseError> {
+        Self::parse_inner(parser, false)
+    }
+
+    pub fn parse_addpath(parser: &mut Parser<'a, Octs>) -> Result<Self, ParseError> {
+        Self::parse_inner(parser, true)
+    }
+
+    fn parse_inner(parser: &mut Parser<'a, Octs>, addpath: bool) -> Result<Self, ParseError> {
         let peer_asn = Asn::from_u32(parser.parse_u16_be()?.into());
         let local_asn = Asn::from_u32(parser.parse_u16_be()?.into());
         let interface = parser.parse_u16_be()?;
@@ -828,6 +898,7 @@ impl<'a, Octs: Octets> Message<'a, Octs> {
                 peer_addr,
                 local_addr,
                 bgp_msg,
+                addpath,
             }
         )
 
@@ -842,11 +913,20 @@ pub struct MessageAs4<'a, Octs> {
     afi: Afi,
     peer_addr: IpAddr,
     local_addr: IpAddr,
-    bgp_msg: Parser<'a, Octs>
+    bgp_msg: Parser<'a, Octs>,
+    addpath: bool,
 }
 
 impl<'a, Octs: Octets> MessageAs4<'a, Octs> {
     pub fn parse(parser: &mut Parser<'a, Octs>) -> Result<Self, ParseError> {
+        Self::parse_inner(parser, false)
+    }
+
+    pub fn parse_addpath(parser: &mut Parser<'a, Octs>) -> Result<Self, ParseError> {
+        Self::parse_inner(parser, true)
+    }
+
+    fn parse_inner(parser: &mut Parser<'a, Octs>, addpath: bool) -> Result<Self, ParseError> {
         let peer_asn = parser.parse_u32_be()?.into();
         let local_asn = parser.parse_u32_be()?.into();
         let interface = parser.parse_u16_be()?;
@@ -878,15 +958,30 @@ impl<'a, Octs: Octets> MessageAs4<'a, Octs> {
                 peer_addr,
                 local_addr,
                 bgp_msg,
+                addpath,
             }
         )
 
     }
 
     pub fn bgp_msg(&self) -> Result<BgpMsg<&[u8]>, ParseError> {
+        let mut config = SessionConfig::modern();
+        if self.addpath {
+            for family in [
+                AfiSafiType::Ipv4Unicast, AfiSafiType::Ipv4Multicast,
+                AfiSafiType::Ipv4MplsUnicast, AfiSafiType::Ipv4MplsVpnUnicast,
+                AfiSafiType::Ipv4RouteTarget, AfiSafiType::Ipv4FlowSpec,
+                AfiSafiType::Ipv6Unicast, AfiSafiType::Ipv6Multicast,
+                AfiSafiType::Ipv6MplsUnicast, AfiSafiType::Ipv6MplsVpnUnicast,
+                AfiSafiType::Ipv6FlowSpec, AfiSafiType::L2VpnVpls,
+                AfiSafiType::L2VpnEvpn,
+            ] {
+                config.add_addpath_rxtx(family);
+            }
+        }
         BgpMsg::from_octets(
             self.bgp_msg.peek_all(),
-            Some(&SessionConfig::modern())
+            Some(&config)
         )
     }
 
@@ -908,6 +1003,7 @@ impl<'a, Octs> From<Message<'a, Octs>> for MessageAs4<'a, Octs> {
             peer_addr: value.peer_addr,
             local_addr: value.local_addr,
             bgp_msg: value.bgp_msg
+            ,addpath: value.addpath
         }
     }
 }
@@ -948,12 +1044,12 @@ impl<'a, Octs: Octets> Iterator for UpdateIterator<'a, Octs> {
                         eprintln!("{e}")
                     ).ok().map(Into::into)
                 }
-                Bgp4MpSubType::Message => {
+                Bgp4MpSubType::Message | Bgp4MpSubType::MessageLocal => {
                    Message::parse(&mut m.message).inspect_err(|e|
                         eprintln!("{e}")
                     ).ok().map(Into::into)
                 }
-                Bgp4MpSubType::MessageAs4 => {
+                Bgp4MpSubType::MessageAs4 | Bgp4MpSubType::MessageAs4Local => {
                    MessageAs4::parse(&mut m.message).inspect_err(|e|
                         eprintln!("{e}")
                    ).ok().map(Into::into)
@@ -963,9 +1059,19 @@ impl<'a, Octs: Octets> Iterator for UpdateIterator<'a, Octs> {
                         eprintln!("{e}")
                     ).ok().map(Into::into)
                 }
-                Bgp4MpSubType::MessageLocal
-                | Bgp4MpSubType::MessageAs4Local
-                | Bgp4MpSubType::Unimplemented(_) => continue,
+                Bgp4MpSubType::MessageAddpath
+                | Bgp4MpSubType::MessageLocalAddpath => {
+                    Message::parse_addpath(&mut m.message).inspect_err(|e|
+                        eprintln!("{e}")
+                    ).ok().map(Into::into)
+                }
+                Bgp4MpSubType::MessageAs4Addpath
+                | Bgp4MpSubType::MessageAs4LocalAddpath => {
+                    MessageAs4::parse_addpath(&mut m.message).inspect_err(|e|
+                        eprintln!("{e}")
+                    ).ok().map(Into::into)
+                }
+                Bgp4MpSubType::Unimplemented(_) => continue,
             };
 
             if res.is_none() {
@@ -1107,11 +1213,13 @@ impl fmt::Display for RibEntryNlri {
 /// so the caller can skip the record instead of failing.
 fn parse_rib_generic_header<'a, Octs: Octets>(
     parser: &mut Parser<'a, Octs>,
-) -> Result<Option<(AfiSafiType, RibEntryNlri, Parser<'a, Octs>)>, ParseError>
+    addpath: bool,
+) -> Result<Option<(AfiSafiType, RibEntryNlri, Option<u32>, Parser<'a, Octs>)>, ParseError>
 {
     let _seq_number = parser.parse_u32_be()?;
     let afi = parser.parse_u16_be()?;
     let safi = parser.parse_u8()?;
+    let path_id = if addpath { Some(parser.parse_u32_be()?) } else { None };
     match (afi, safi) {
         (1, 133) | (2, 133) => {
             let nlri = crate::bgp::nlri::flowspec::FlowSpecNlri::parse(
@@ -1128,6 +1236,7 @@ fn parse_rib_generic_header<'a, Octs: Octets>(
             Ok(Some((
                 afisafi,
                 RibEntryNlri::FlowSpec(nlri.raw().as_ref().to_vec()),
+                path_id,
                 entries,
             )))
         }
@@ -1140,6 +1249,8 @@ pub struct RibEntryIterator<'a, Octs> {
     parser: Parser<'a, Octs>,
     current_table: Option<(RibEntryNlri, Parser<'a, Octs>)>,
     current_afisafi: Option<AfiSafiType>,
+    current_addpath: bool,
+    current_nlri_path_id: Option<u32>,
     fused: bool,
 }
 impl<'a, Octs> RibEntryIterator<'a, Octs> {
@@ -1149,6 +1260,8 @@ impl<'a, Octs> RibEntryIterator<'a, Octs> {
             parser,
             current_table: None,
             current_afisafi: None,
+            current_addpath: false,
+            current_nlri_path_id: None,
             fused: false,
         }
     }
@@ -1160,7 +1273,7 @@ where
     Vec<u8>: OctetsFrom<Octs::Range<'a>>
 {
     type Item = Result<
-        (AfiSafiType, u16, PeerEntry, RibEntryNlri, Vec<u8>),
+        (AfiSafiType, u16, PeerEntry, RibEntryNlri, Option<u32>, Vec<u8>),
         ParseError
     >;
 
@@ -1200,6 +1313,8 @@ where
                             entries,
                         ));
                         self.current_afisafi = Some(AfiSafiType::Ipv4Unicast);
+                        self.current_addpath = false;
+                        self.current_nlri_path_id = None;
                     }
                     TableDumpv2SubType::RibIpv6Unicast => {
                         let reh = match RibEntryHeader::parse(
@@ -1217,12 +1332,58 @@ where
                             entries,
                         ));
                         self.current_afisafi = Some(AfiSafiType::Ipv6Unicast);
+                        self.current_addpath = false;
+                        self.current_nlri_path_id = None;
                     }
-                    TableDumpv2SubType::RibGeneric => {
-                        match parse_rib_generic_header(&mut m.message) {
-                            Ok(Some((afisafi, nlri, entries))) => {
+                    TableDumpv2SubType::RibIpv4UnicastAddpath => {
+                        let reh = match RibEntryHeader::parse(&mut m.message, Afi::Ipv4) {
+                            Ok(header) => header,
+                            Err(err) => { self.fused = true; return Some(Err(err)); }
+                        };
+                        self.current_table = Some((RibEntryNlri::Prefix(reh.prefix()), reh.entries));
+                        self.current_afisafi = Some(AfiSafiType::Ipv4Unicast);
+                        self.current_addpath = true;
+                        self.current_nlri_path_id = None;
+                    }
+                    TableDumpv2SubType::RibIpv6UnicastAddpath => {
+                        let reh = match RibEntryHeader::parse(&mut m.message, Afi::Ipv6) {
+                            Ok(header) => header,
+                            Err(err) => { self.fused = true; return Some(Err(err)); }
+                        };
+                        self.current_table = Some((RibEntryNlri::Prefix(reh.prefix()), reh.entries));
+                        self.current_afisafi = Some(AfiSafiType::Ipv6Unicast);
+                        self.current_addpath = true;
+                        self.current_nlri_path_id = None;
+                    }
+                    TableDumpv2SubType::RibIpv4MulticastAddpath => {
+                        let reh = match RibEntryHeader::parse(&mut m.message, Afi::Ipv4) {
+                            Ok(header) => header,
+                            Err(err) => { self.fused = true; return Some(Err(err)); }
+                        };
+                        self.current_table = Some((RibEntryNlri::Prefix(reh.prefix()), reh.entries));
+                        self.current_afisafi = Some(AfiSafiType::Ipv4Multicast);
+                        self.current_addpath = true;
+                        self.current_nlri_path_id = None;
+                    }
+                    TableDumpv2SubType::RibIpv6MulticastAddpath => {
+                        let reh = match RibEntryHeader::parse(&mut m.message, Afi::Ipv6) {
+                            Ok(header) => header,
+                            Err(err) => { self.fused = true; return Some(Err(err)); }
+                        };
+                        self.current_table = Some((RibEntryNlri::Prefix(reh.prefix()), reh.entries));
+                        self.current_afisafi = Some(AfiSafiType::Ipv6Multicast);
+                        self.current_addpath = true;
+                        self.current_nlri_path_id = None;
+                    }
+                    TableDumpv2SubType::RibGeneric
+                    | TableDumpv2SubType::RibGenericAddpath => {
+                        let addpath = tdv2 == TableDumpv2SubType::RibGenericAddpath;
+                        match parse_rib_generic_header(&mut m.message, addpath) {
+                            Ok(Some((afisafi, nlri, path_id, entries))) => {
                                 self.current_table = Some((nlri, entries));
                                 self.current_afisafi = Some(afisafi);
+                                self.current_addpath = false;
+                                self.current_nlri_path_id = path_id;
                             }
                             // Unsupported family or malformed record:
                             // skip it rather than panic.
@@ -1243,7 +1404,11 @@ where
         }
 
         let (nlri, mut entries) = self.current_table.take().unwrap();
-        let re = match RibEntry::parse(&mut entries) {
+        let re = match if self.current_addpath {
+            RibEntry::parse_addpath(&mut entries)
+        } else {
+            RibEntry::parse(&mut entries)
+        } {
             Ok(entry) => entry,
             Err(err) => {
                 self.fused = true;
@@ -1272,6 +1437,7 @@ where
             re.peer_idx,
             *peer,
             nlri,
+            re.path_id().or(self.current_nlri_path_id),
             raw_attr
         )))
     }

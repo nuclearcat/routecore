@@ -80,12 +80,14 @@ fn parses_generated_table_dump_v2_routes() {
     assert_eq!(entries[0].0, AfiSafiType::Ipv4Unicast);
     assert_eq!(entries[0].3.to_string(), "192.0.2.0/24");
     assert_eq!(entries[0].2.asn.into_u32(), 64500);
-    assert!(!entries[0].4.is_empty());
+    assert!(entries[0].4.is_none());
+    assert!(!entries[0].5.is_empty());
 
     assert_eq!(entries[1].0, AfiSafiType::Ipv6Unicast);
     assert_eq!(entries[1].3.to_string(), "2001:db8:100::/48");
     assert_eq!(entries[1].2.asn.into_u32(), 64500);
-    assert!(!entries[1].4.is_empty());
+    assert!(entries[1].4.is_none());
+    assert!(!entries[1].5.is_empty());
 }
 
 #[test]
