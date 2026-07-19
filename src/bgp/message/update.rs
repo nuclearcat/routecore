@@ -1047,6 +1047,7 @@ pub struct SessionConfig {
     four_octet_asns: FourOctetAsns,
     ipv4unicast_in_mp: Ipv4UnicastInMp,
     addpath_fams: SessionAddpaths,
+    extended_messages: bool,
     // TODO keep track of enabled MP AFISAFIs?
     // see intersection in From<NegotiatedConfig> for SessionConfig in session.rs
 }
@@ -1213,6 +1214,7 @@ impl SessionConfig {
             four_octet_asns: FourOctetAsns(true),
             ipv4unicast_in_mp: Ipv4UnicastInMp(false),
             addpath_fams: SessionAddpaths::new(),
+            extended_messages: false,
         }
     }
 
@@ -1222,7 +1224,18 @@ impl SessionConfig {
             four_octet_asns: FourOctetAsns(false),
             ipv4unicast_in_mp: Ipv4UnicastInMp(false),
             addpath_fams: SessionAddpaths::new(),
+            extended_messages: false,
         }
+    }
+
+    /// Returns whether Extended Message support was negotiated.
+    pub fn extended_messages(&self) -> bool {
+        self.extended_messages
+    }
+
+    /// Enables Extended Message support for this session.
+    pub fn enable_extended_messages(&mut self) {
+        self.extended_messages = true;
     }
 
     /// Returns true if IPv4 Unicast is carried as MultiProtocol attribute.

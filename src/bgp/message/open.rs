@@ -855,6 +855,10 @@ impl<Target: OctetsBuilder + AsMut<[u8]>> OpenBuilder<Target> {
         self.add_capability(Capability::for_slice(s.to_vec()));
     }
 
+    pub fn extended_message_capable(&mut self) {
+        self.add_capability(Capability::for_slice(vec![0x06, 0x00]));
+    }
+
     pub fn add_mp(&mut self, afisafi: AfiSafiType) {
         // code 1
         // length n
@@ -1208,6 +1212,18 @@ mod builder {
         for ap in res.addpath_families_vec().unwrap().iter() {
             eprintln!("{:?}", ap);
         }
+    }
+
+    #[test]
+    fn builder_extended_message() {
+        let mut open = OpenBuilder::new_vec();
+        open.extended_message_capable();
+
+        let message = open.into_message();
+
+        assert!(message
+            .capabilities()
+            .any(|cap| cap.typ() == CapabilityType::ExtendedMessage));
     }
 
 

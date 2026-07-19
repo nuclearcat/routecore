@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::net::{IpAddr, SocketAddr};
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -173,9 +172,8 @@ impl<C: BgpConfig + Send> Session<C> {
     pub fn set_negotiated_config(&mut self, config: NegotiatedConfig) {
         self.negotiated = Some(config);
         if let Some(sc) = self.connection.as_mut() {
-            for famdir in &self.negotiated.as_ref().unwrap().addpath {
-                sc.session_config_mut().add_famdir(*famdir);
-            }
+            *sc.session_config_mut() =
+                SessionConfig::from(self.negotiated.as_ref().unwrap());
         } else {
             warn!("set_negotiated_config: no Connection for Session");
         }
@@ -399,6 +397,7 @@ impl<C: BgpConfig + Send> Session<C> {
         openbuilder.set_bgp_id(self.config.bgp_id());
 
         openbuilder.four_octet_capable(self.config.local_asn());
+        openbuilder.extended_message_capable();
 
         for afisafi in &self.config.protocols() {
             openbuilder.add_mp(*afisafi);
@@ -1949,25 +1948,45 @@ impl Connection {
     // and do the parsing within the FSM so we can send the correct
     // NOTIFICATIONs etc?
     fn parse_frame(&mut self) -> Result<Option<BgpMsg<Bytes>>, ParseError> {
-        let mut buf = Cursor::new(&self.buffer[..]);
-
-        if buf.remaining() >= 16 + 2 {
-            buf.set_position(16);
-            let len = buf.get_u16();
-            if buf.remaining() >= ((len as usize) - 18) {
-                //return Ok(len)
-                buf.set_position(0);
-                let b =
-                    Bytes::copy_from_slice(&buf.into_inner()[..len.into()]);
-                // XXX the SessionConfig needs to be updated based on the
-                // exchanged BGP OPENs
-                let msg = BgpMsg::from_octets(b, Some(&self.session_config))?;
-                self.buffer.advance(len.into());
-                return Ok(Some(msg));
-            }
-        }
-        Ok(None)
+        parse_frame(&mut self.buffer, &self.session_config)
     }
+}
+
+fn parse_frame(
+    buffer: &mut BytesMut,
+    session_config: &SessionConfig,
+) -> Result<Option<BgpMsg<Bytes>>, ParseError> {
+    if buffer.len() < 18 {
+        return Ok(None);
+    }
+
+    let len = u16::from_be_bytes([buffer[16], buffer[17]]) as usize;
+    if len < 19 {
+        return Err(ParseError::form_error("BGP message length below 19"));
+    }
+    if buffer.len() < 19 {
+        return Ok(None);
+    }
+
+    let extended = session_config.extended_messages();
+    let max_len = match buffer[18] {
+        1 | 4 => 4096, // OPEN and KEEPALIVE are never extended.
+        _ if extended => u16::MAX as usize,
+        _ => 4096,
+    };
+    if len > max_len {
+        return Err(ParseError::form_error(
+            "BGP message exceeds negotiated maximum length",
+        ));
+    }
+    if buffer.len() < len {
+        return Ok(None);
+    }
+
+    let bytes = Bytes::copy_from_slice(&buffer[..len]);
+    let message = BgpMsg::from_octets(bytes, Some(session_config))?;
+    buffer.advance(len);
+    Ok(Some(message))
 }
 
 async fn maybe_read_frame(
@@ -2130,6 +2149,15 @@ impl From<&NegotiatedConfig> for SessionConfig {
         for ap in value.addpath.iter() {
             session_config.add_famdir(*ap);
         }
+        if local_caps
+            .iter()
+            .any(|c| c.typ() == CapabilityType::ExtendedMessage)
+            && remote_caps
+                .iter()
+                .any(|c| c.typ() == CapabilityType::ExtendedMessage)
+        {
+            session_config.enable_extended_messages();
+        }
 
         session_config
     }
@@ -2280,6 +2308,16 @@ mod tests {
 mod negotiated_addpaths_tests {
     use super::*;
 
+    fn oversized_update(len: usize) -> BytesMut {
+        assert!(len > 4096 && len <= u16::MAX as usize);
+        let mut bytes = vec![0xff; len];
+        bytes[16..18].copy_from_slice(&(len as u16).to_be_bytes());
+        bytes[18] = 2;
+        bytes[19..23].fill(0);
+        bytes[23..].fill(0);
+        BytesMut::from(bytes.as_slice())
+    }
+
     #[test]
     fn directions_are_from_the_local_perspective() {
         let family = AfiSafiType::Ipv4Unicast;
@@ -2306,5 +2344,54 @@ mod negotiated_addpaths_tests {
             &[(AfiSafiType::Ipv6Unicast, AddpathDirection::SendReceive)]
         )
         .is_empty());
+    }
+
+    #[test]
+    fn extended_messages_require_both_capabilities() {
+        let mut negotiated = NegotiatedConfig::dummy();
+        negotiated.local_capabilities = vec![6, 0];
+
+        assert!(!SessionConfig::from(&negotiated).extended_messages());
+
+        negotiated.remote_capabilities = vec![6, 0];
+        assert!(SessionConfig::from(&negotiated).extended_messages());
+    }
+
+    #[test]
+    fn rejects_oversized_update_without_negotiation() {
+        let mut bytes = oversized_update(4097);
+
+        let err = match parse_frame(&mut bytes, &SessionConfig::modern()) {
+            Err(err) => err,
+            Ok(_) => panic!("oversized UPDATE unexpectedly accepted"),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "BGP message exceeds negotiated maximum length"
+        );
+        assert_eq!(bytes.len(), 4097);
+    }
+
+    #[test]
+    fn accepts_oversized_update_after_negotiation() {
+        let mut config = SessionConfig::modern();
+        config.enable_extended_messages();
+        let mut bytes = oversized_update(4097);
+
+        let message = parse_frame(&mut bytes, &config).unwrap();
+
+        assert!(matches!(message, Some(BgpMsg::Update(_))));
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn extended_capability_does_not_extend_open_messages() {
+        let mut config = SessionConfig::modern();
+        config.enable_extended_messages();
+        let mut bytes = oversized_update(4097);
+        bytes[18] = 1;
+
+        assert!(parse_frame(&mut bytes, &config).is_err());
     }
 }
