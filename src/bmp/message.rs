@@ -231,8 +231,8 @@ impl<Octets: AsRef<[u8]>> Display for Message<Octets> {
 impl<Octs: Octets> Debug for Message<Octs> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let _ = writeln!(f, "{:?} ({})",
-            &self.common_header().msg_type(),
-            &self.common_header().length()
+            self.common_header().msg_type(),
+            self.common_header().length()
         );
         write!(f, "{:02x?}", &self.as_ref()[0..self.length() as usize])
     }

@@ -301,7 +301,7 @@ impl PaMap {
         if let PathAttribute::Invalid(..) = attr {
             warn!(
                 "adding Invalid attribute to UpdateBuilder: {}",
-                &attr.type_code()
+                attr.type_code()
             );
         }
 

@@ -1234,13 +1234,16 @@ impl fmt::Display for RibEntryNlri {
     }
 }
 
+type RibGenericHeader<'a, Octs> =
+    (AfiSafiType, RibEntryNlri, Option<u32>, Parser<'a, Octs>);
+
 /// Parse a RIB_GENERIC entry header (RFC 6396 §4.3.3). Returns `Ok(None)`
 /// for AFI/SAFIs whose NLRI we cannot frame (only FlowSpec is supported),
 /// so the caller can skip the record instead of failing.
 fn parse_rib_generic_header<'a, Octs: Octets>(
     parser: &mut Parser<'a, Octs>,
     addpath: bool,
-) -> Result<Option<(AfiSafiType, RibEntryNlri, Option<u32>, Parser<'a, Octs>)>, ParseError>
+) -> Result<Option<RibGenericHeader<'a, Octs>>, ParseError>
 {
     let _seq_number = parser.parse_u32_be()?;
     let afi = parser.parse_u16_be()?;

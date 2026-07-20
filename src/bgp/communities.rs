@@ -623,7 +623,7 @@ impl Display for StandardCommunity {
         if let Some(wk) = self.to_wellknown() {
             write!(f, "{}", wk)
         } else { 
-            write!(f, "{}:{}", &self.asn().unwrap(), &self.tag().unwrap())
+            write!(f, "{}:{}", self.asn().unwrap(), self.tag().unwrap())
         }
     }
 
@@ -1097,15 +1097,15 @@ impl Display for ExtendedCommunity {
  
             (TransitiveTwoOctetSpecific, RouteTarget) =>   
                 write!(f, "rt:{}:{}",
-                       &self.as2().unwrap(), &self.an4().unwrap()
+                       self.as2().unwrap(), self.an4().unwrap()
                       ),
             (TransitiveIp4Specific, RouteTarget) =>   
                 write!(f, "rt:{}:{}",
-                       &self.ip4().unwrap(), &self.an2().unwrap()
+                       self.ip4().unwrap(), self.an2().unwrap()
                       ),
             (TransitiveFourOctetSpecific, RouteTarget) =>   
                 write!(f, "rt:{}:{}",
-                       &self.as4().unwrap(), &self.an2().unwrap()
+                       self.as4().unwrap(), self.an2().unwrap()
                       ),
             (NonTransitiveOpaque, RouteTarget) => {
                 write!(f, "rt:")?;
@@ -1119,15 +1119,15 @@ impl Display for ExtendedCommunity {
 
             (TransitiveTwoOctetSpecific, RouteOrigin) =>   
                 write!(f, "ro:{}:{}",
-                       &self.as2().unwrap(), &self.an4().unwrap()
+                       self.as2().unwrap(), self.an4().unwrap()
                       ),
             (TransitiveIp4Specific, RouteOrigin) =>   
                 write!(f, "ro:{}:{}",
-                       &self.ip4().unwrap(), &self.an2().unwrap()
+                       self.ip4().unwrap(), self.an2().unwrap()
                       ),
             (TransitiveFourOctetSpecific, RouteOrigin) =>   
                 write!(f, "ro:{}:{}",
-                       &self.as4().unwrap(), &self.an2().unwrap()
+                       self.as4().unwrap(), self.an2().unwrap()
                       ),
 
 
@@ -1423,7 +1423,7 @@ impl Display for Ipv6ExtendedCommunity {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
         match self.0[0..2] {
             [0x00, 0x02] => write!(f, "rt:{}:{}",
-                                &self.ip6(), &self.an2()
+                                self.ip6(), self.an2()
                             ),
             _ => {
                 write!(f, "0x")?;

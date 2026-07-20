@@ -1060,7 +1060,7 @@ impl<C: BgpConfig + Send> Session<C> {
                     &self.config.addpath(),
                     &received_addpaths,
                 );
-                debug!("addpath intersection: {:?}", &intersection);
+                debug!("addpath intersection: {:?}", intersection);
 
 
                 self.send_open().await?;
@@ -1364,7 +1364,7 @@ impl<C: BgpConfig + Send> Session<C> {
                     &self.config.addpath(),
                     &received_addpaths,
                 );
-                debug!("addpath intersection: {:?}", &intersection);
+                debug!("addpath intersection: {:?}", intersection);
 
                 let negotiated = NegotiatedConfig {
                     hold_time: std::cmp::min(open_msg.holdtime(), self.hold_time()),

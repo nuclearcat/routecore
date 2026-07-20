@@ -135,7 +135,7 @@ impl SessionAttributes {
     }
 
     pub fn set_state(&mut self, state: State) {
-        debug!("FSM {:?} -> {:?}", &self.state, state);
+        debug!("FSM {:?} -> {:?}", self.state, state);
         self.state = state;
     }
 }
