@@ -670,7 +670,9 @@ impl<C: BgpConfig + Send> Session<C> {
                 E::KeepaliveMsg |
                 E::UpdateMsg |
                 E::UpdateMsgErr
-             ) => warn!("(unexpected) non-event {:?} in state Idle", event),
+             ) => {
+                 warn!("(unexpected) non-event {:?} in state Idle", event);
+             }
 
             //--- Connect ----------------------------------------------------
             (S::Connect,
